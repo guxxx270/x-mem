@@ -6,6 +6,7 @@ package transcript
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
@@ -175,6 +176,31 @@ func Norm(s string) string {
 	return b.String()
 }
 
+// longestRun is the longest stretch of Chinese characters in s, used as a
+// cheap pre-filter: whatever punctuation, spacing or letter case the quote
+// was copied with, this part is in the file byte for byte.
+func longestRun(s string) string {
+	best, cur := "", []rune{}
+	flush := func() {
+		if len(cur) > len([]rune(best)) {
+			best = string(cur)
+		}
+		cur = cur[:0]
+	}
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			cur = append(cur, r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	if len([]rune(best)) < 3 {
+		return ""
+	}
+	return best
+}
+
 // Found is where a quote was found.
 type Found struct {
 	Session string // "claude:<session id>"
@@ -190,7 +216,16 @@ func FindQuote(quote string, within time.Duration) (Found, bool) {
 	if len([]rune(q)) < 4 {
 		return Found{}, false
 	}
+	key := longestRun(quote)
 	for _, p := range Recent(within, 200) {
+		// Session files can be large: skip the ones that cannot contain the
+		// quote before parsing any JSON.
+		if key != "" {
+			data, err := os.ReadFile(p)
+			if err != nil || !bytes.Contains(data, []byte(key)) {
+				continue
+			}
+		}
 		msgs, _, err := ReadFrom(p, 0)
 		if err != nil {
 			continue
