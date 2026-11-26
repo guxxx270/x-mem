@@ -28,7 +28,7 @@ import (
 	"x-mem/internal/textutil"
 )
 
-const formatVersion = 4
+const formatVersion = 5
 
 // Field weights: a term in the title or an alias counts three times a term in
 // the body.
@@ -43,6 +43,7 @@ const (
 type Doc struct {
 	ID, Title, Type, Layer, Rel, Path string
 	Aliases, Triggers                 []string
+	Enforcement, Sensitivity          string
 	Relations                         []note.Relation
 	Size, MTime                       int64
 
@@ -211,6 +212,7 @@ func build(l config.Layers, sigs []sig, today string) (*Index, error) {
 		d := &Doc{
 			ID: n.ID, Title: n.Title, Type: n.Type, Layer: s.layer, Rel: n.Rel, Path: s.path,
 			Aliases: n.Aliases, Triggers: n.Triggers, Relations: n.Relations,
+			Enforcement: n.Enforcement, Sensitivity: n.Sensitivity,
 			Size: s.size, MTime: s.mtime, NoteProblems: n.Problems,
 			Suspicious: note.Suspicious(n.Title + "\n" + n.Body),
 			note:       n,
@@ -393,6 +395,58 @@ func (ix *Index) link(today string) {
 				d.ConflictsWith = append(d.ConflictsWith, t.ID)
 				t.ConflictsWith = append(t.ConflictsWith, d.ID)
 			}
+		}
+	}
+	ix.findCycles()
+}
+
+// findCycles reports notes whose @supersedes / @refines chain comes back to
+// itself: such a chain has no current version.
+func (ix *Index) findCycles() {
+	next := map[*Doc][]*Doc{}
+	for _, d := range ix.Docs {
+		for _, r := range d.Relations {
+			if r.Op != "@supersedes" && r.Op != "@refines" {
+				continue
+			}
+			if t := ix.Lookup(r.Target); t != nil && t != d {
+				next[d] = append(next[d], t)
+			}
+		}
+	}
+	const (
+		white = iota
+		grey
+		black
+	)
+	color := map[*Doc]int{}
+	var visit func(d *Doc, path []*Doc)
+	visit = func(d *Doc, path []*Doc) {
+		color[d] = grey
+		path = append(path, d)
+		for _, t := range next[d] {
+			switch color[t] {
+			case grey:
+				var names []string
+				start := 0
+				for i, p := range path {
+					if p == t {
+						start = i
+					}
+				}
+				for _, p := range path[start:] {
+					names = append(names, p.Title)
+				}
+				t.Problems = append(t.Problems, "取代/细化关系成环："+strings.Join(names, " → ")+" → "+t.Title)
+			case white:
+				visit(t, path)
+			}
+		}
+		color[d] = black
+	}
+	for _, d := range ix.Docs {
+		if color[d] == white {
+			visit(d, nil)
 		}
 	}
 }

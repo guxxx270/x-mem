@@ -35,17 +35,23 @@ func cmdInstall(args []string) error {
 	hookCmd := func(ev string) map[string]any {
 		return map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(exe) + " hook " + ev, "timeout": 5}}}
 	}
+	guardGroup := hookCmd("guard")
+	guardGroup["matcher"] = "*"
 	ours := map[string]any{
 		"SessionStart":     hookCmd("start"),
 		"UserPromptSubmit": hookCmd("prompt"),
+		"PreToolUse":       guardGroup,
+		"Stop":             hookCmd("stop"),
 	}
 	mcpArgs := []string{"mcp", "add", "--scope", "user", "x-mem", "--", exe, "mcp"}
 
 	if !*apply {
-		data, _ := json.MarshalIndent(map[string]any{"hooks": map[string]any{
-			"SessionStart": []any{ours["SessionStart"]}, "UserPromptSubmit": []any{ours["UserPromptSubmit"]},
-		}}, "", "  ")
-		fmt.Println("1. 把下面的 hooks 合并进 " + settingsPath() + "（已有 hooks 时只加这两项，别覆盖）：")
+		hooks := map[string]any{}
+		for k, v := range ours {
+			hooks[k] = []any{v}
+		}
+		data, _ := json.MarshalIndent(map[string]any{"hooks": hooks}, "", "  ")
+		fmt.Println("1. 把下面的 hooks 合并进 " + settingsPath() + "（已有 hooks 时只加这四项，别覆盖）：")
 		fmt.Println()
 		fmt.Println(string(data))
 		fmt.Println()
@@ -167,7 +173,15 @@ func mergeHooks(path string, ours map[string]any) (backup string, err error) {
 func isOurHook(g any) bool {
 	b, _ := json.Marshal(g)
 	s := string(b)
-	return strings.Contains(s, "x-mem") && (strings.Contains(s, " hook start") || strings.Contains(s, " hook prompt"))
+	if !strings.Contains(s, "x-mem") {
+		return false
+	}
+	for _, ev := range []string{" hook start", " hook prompt", " hook guard", " hook stop"} {
+		if strings.Contains(s, ev) {
+			return true
+		}
+	}
+	return false
 }
 
 // orderedObject splits a JSON object into its keys, in file order, and raw

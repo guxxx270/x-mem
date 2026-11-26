@@ -20,7 +20,7 @@ func cmdImport(args []string) error {
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
 	dry := fs.Bool("dry-run", false, "只列出会做什么，不写文件")
 	force := fs.Bool("force", false, "覆盖之前导入过的同名文件")
-	fs.Parse(reorder(args[1:]))
+	fs.Parse(reorder(fs, args[1:]))
 	vault := fs.Arg(0)
 	if vault == "" {
 		vault = defaultVault()
@@ -124,15 +124,35 @@ func defaultVault() string {
 	return strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])
 }
 
-// reorder moves flags in front of positional arguments, so that
-// "x-mem import obsidian ~/库 --dry-run" works like the flag-first form.
-func reorder(args []string) []string {
+// reorder moves flags (and their values) in front of positional arguments,
+// so "x-mem import obsidian ~/库 --dry-run" works like the flag-first form.
+func reorder(fs *flag.FlagSet, args []string) []string {
 	var flags, rest []string
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			flags = append(flags, a)
-		} else {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			rest = append(rest, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
 			rest = append(rest, a)
+			continue
+		}
+		flags = append(flags, a)
+		name := strings.TrimLeft(a, "-")
+		if strings.Contains(name, "=") {
+			continue
+		}
+		f := fs.Lookup(name)
+		if f == nil {
+			continue
+		}
+		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+			continue
+		}
+		if i+1 < len(args) {
+			flags = append(flags, args[i+1])
+			i++
 		}
 	}
 	return append(flags, rest...)

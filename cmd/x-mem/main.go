@@ -11,10 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
+	"x-mem/internal/capture"
 	"x-mem/internal/config"
 	"x-mem/internal/eval"
 	"x-mem/internal/hook"
@@ -23,23 +25,33 @@ import (
 	"x-mem/internal/mcp"
 	"x-mem/internal/recall"
 	"x-mem/internal/textutil"
+	"x-mem/internal/writer"
 )
 
-const usage = `x-mem：给编程 agent 用的本地记忆（第一期：只读）
+const usage = `x-mem：给编程 agent 用的本地记忆
 
-用法：
-  x-mem init [--personal]        建个人层；在当前仓库里建项目层（--personal 只建个人层）
+查：
   x-mem recall [--scope S] 问题   查记忆，第一行是 direct / related / none
   x-mem why 问题                  解释为什么是这个结果
   x-mem read <id|文件名|标题>     看一条笔记的全文和关系
-  x-mem status                    库和索引的状态
-  x-mem doctor                    体检，给出修复办法
+
+写：
+  x-mem remember [选项] 内容      记一条（--kind rule、--supersedes id [--line 原文]、--trigger 'Bash(git push*)'）
+  x-mem inbox [show|approve|reject]  待确认的提案
+  x-mem undo <run>                撤回一次写入
+  x-mem log                       最近的写入
+  x-mem capture on|off|status     会话自动采集（默认关）
+  x-mem writer [--once]           写入进程（平时由钩子和定时任务拉起）
+
+管理：
+  x-mem init [--personal]         建个人层；在当前仓库里建项目层
+  x-mem status / doctor           状态 / 体检
   x-mem reindex                   删掉索引重建（平时不需要）
   x-mem eval <题集.json>          跑回归题集
-  x-mem hook start|prompt         Claude Code 钩子（从标准输入读事件）
+  x-mem import obsidian [库目录]   从 旧记忆库 库导入（--dry-run 先预演）
+  x-mem install claude-code       接入 Claude Code（--apply 直接改配置，先备份）
+  x-mem hook start|prompt|guard|stop   Claude Code 钩子（从标准输入读事件）
   x-mem mcp                       以 MCP 服务运行（stdio）
-  x-mem import obsidian [库目录]   从 旧记忆库 库导入（--dry-run 先看会做什么）
-  x-mem install claude-code       打印接入 Claude Code 要加的配置（--apply 直接改，先备份）
   x-mem version
 
 环境变量：X_MEM_HOME 改个人层位置（默认 ~/.x-mem），X_MEM_PROJECT 指定项目层。
@@ -71,7 +83,7 @@ func main() {
 		os.Exit(cmdEval(args))
 	case "hook":
 		if len(args) != 1 {
-			err = fmt.Errorf("用法：x-mem hook start|prompt")
+			err = fmt.Errorf("用法：x-mem hook start|prompt|guard|stop")
 			break
 		}
 		if out := hook.Run(args[0], os.Stdin, time.Now()); out != "" {
@@ -83,6 +95,18 @@ func main() {
 		err = cmdInstall(args)
 	case "import":
 		err = cmdImport(args)
+	case "remember":
+		err = cmdRemember(args)
+	case "inbox":
+		err = cmdInbox(args)
+	case "undo":
+		err = cmdUndo(args)
+	case "log":
+		err = cmdLog(args)
+	case "writer":
+		err = cmdWriter(args)
+	case "capture":
+		err = cmdCapture(args)
 	case "version", "--version", "-v":
 		fmt.Println("x-mem", mcp.Version)
 	case "help", "--help", "-h":
@@ -351,10 +375,39 @@ func cmdDoctor() int {
 		}
 	}
 	home, _ := os.UserHomeDir()
-	if data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json")); err == nil && strings.Contains(string(data), "x-mem hook") {
-		ok("Claude Code 钩子已配置")
-	} else {
-		note("Claude Code 钩子还没配置 → x-mem install claude-code")
+	settings, _ := os.ReadFile(settingsPath())
+	var missing []string
+	for _, ev := range []string{"start", "prompt", "guard", "stop"} {
+		if !strings.Contains(string(settings), "x-mem hook "+ev) {
+			missing = append(missing, ev)
+		}
+	}
+	switch {
+	case len(missing) == 0:
+		ok("Claude Code 钩子已配置（start / prompt / guard / stop）")
+	case len(missing) == 4:
+		note("Claude Code 钩子还没配置 → x-mem install claude-code --apply")
+	default:
+		fail("Claude Code 钩子缺 %s → x-mem install claude-code --apply", strings.Join(missing, "、"))
+	}
+	in := writer.NewInbox(l.State)
+	if q := in.List(writer.Queued); len(q) > 0 {
+		fail("%d 条提案排队没写进去（%s）→ x-mem writer --once 看原因", len(q), strings.Join(q[0].Problems, "；"))
+	}
+	if r := in.List(writer.Review); len(r) > 0 {
+		note("%d 条提案等你确认 → x-mem inbox", len(r))
+	}
+	if lines := recentLogLines(filepath.Join(l.State, "writer.log"), 7*24*time.Hour, 3); len(lines) > 0 {
+		fail("写入进程最近出过错（state/writer.log）：")
+		for _, ln := range lines {
+			fmt.Println("    " + ln)
+		}
+	}
+	if st := capture.LoadState(l); st.Enabled {
+		ok("会话采集：开")
+		if runtime.GOOS == "darwin" && !capture.TimerInstalled() {
+			fail("会话采集开着，但定时扫描没装 → x-mem capture on")
+		}
 	}
 	if data, err := os.ReadFile(filepath.Join(home, ".claude.json")); err == nil && strings.Contains(string(data), "x-mem") {
 		ok("Claude Code 里注册了 x-mem MCP")

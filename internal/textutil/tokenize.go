@@ -9,6 +9,7 @@
 package textutil
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 )
@@ -359,3 +360,20 @@ func EstimateTokens(s string) int {
 	}
 	return cjk + words*13/10 + other/2
 }
+
+// TitleFrom makes a short title from a sentence: its first clause without
+// asides in brackets or Markdown marks, at most max runes.
+func TitleFrom(s string, max int) string {
+	s = strings.NewReplacer("**", "", "`", "", "\n", " ").Replace(strings.TrimSpace(s))
+	s = parenRe.ReplaceAllString(s, "")
+	if i := strings.IndexAny(s, "，,；;。.！!？?：:"); i > 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(strings.TrimLeft(s, "-*># "))
+	if rs := []rune(s); len(rs) > max {
+		s = string(rs[:max])
+	}
+	return s
+}
+
+var parenRe = regexp.MustCompile(`（[^）]*）|\([^)]*\)`)

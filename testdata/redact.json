@@ -1,0 +1,30 @@
+{
+  "secret": [
+    {"text": "测试库的密码是 Passw0rd!2026，别外传", "secret": "Passw0rd!2026"},
+    {"text": "服务器口令为abc12345", "secret": "abc12345"},
+    {"text": "密码：hunter2hunter", "secret": "hunter2hunter"},
+    {"text": "Slack 通知走 https://hooks.slack.com/services/T0AAAAAAA/B0BBBBBBB/xxxxxxxxxxxxxxxxxxxxxxxx", "secret": "T0AAAAAAA/B0BBBBBBB"},
+    {"text": "用这个 key：sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "secret": "sk-ant-api03"},
+    {"text": "export OPENAI_API_KEY=sk-proj-abcdefghijklmnop1234", "secret": "sk-proj-abcdefghijklmnop1234"},
+    {"text": "github token ghp_abcdefghijklmnopqrstuvwxyz0123456789", "secret": "ghp_abcdefghijklmnopqrstuvwxyz0123456789"},
+    {"text": "AWS 是 AKIAIOSFODNN7EXAMPLE", "secret": "AKIAIOSFODNN7EXAMPLE"},
+    {"text": "企微机器人 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=693a91f6-7xxx-4bc4-97a0-0ec2sifa5aaa", "secret": "693a91f6-7xxx"},
+    {"text": "钉钉 https://oapi.dingtalk.com/robot/send?access_token=6e7f2c1d9a8b", "secret": "6e7f2c1d9a8b"},
+    {"text": "接口 https://api.example.com/v1/data?access_token=Zx9Kq2LmP0", "secret": "Zx9Kq2LmP0"},
+    {"text": "数据库 mysql://root:S3cret!pass@10.0.0.5:3306/app", "secret": "S3cret!pass"},
+    {"text": "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U", "secret": "eyJhbGciOiJIUzI1NiJ9"},
+    {"text": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAx\n-----END RSA PRIVATE KEY-----", "secret": "MIIEowIBAAKCAQEAx"},
+    {"text": "client_secret = 9fJk2LmQ8rTz4Wx1", "secret": "9fJk2LmQ8rTz4Wx1"},
+    {"text": "随手记一个串 aB3dE5gH7jK9mN1pQ3sT", "secret": "aB3dE5gH7jK9mN1pQ3sT"}
+  ],
+  "keep": [
+    "提交 6e987ddde9e77fd3ba65042be300731f5ad92eba 已推送",
+    "文件在 /Users/alice/code/order-service-python/README.md",
+    "钩子预算 token: 1500，端口 3306",
+    "作者：张三，author: Jerry",
+    "函数 compute_daily_return_rate 要改名",
+    "发版改到每周二上午，不再周五",
+    "用 order-service-dev 这个 conda 环境",
+    "tokenizer 用两字切分"
+  ]
+}

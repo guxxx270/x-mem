@@ -46,8 +46,10 @@ func TestServeRecallReadStatus(t *testing.T) {
 		}
 		return r.Result.Content[0].Text
 	}
-	if !strings.Contains(lines[1], `"recall"`) || !strings.Contains(lines[1], `"read"`) || strings.Contains(lines[1], `"propose"`) {
-		t.Fatalf("phase one lists recall, read, status only: %s", lines[1])
+	for _, tool := range []string{`"recall"`, `"read"`, `"propose"`, `"status"`} {
+		if !strings.Contains(lines[1], tool) {
+			t.Fatalf("tools/list misses %s: %s", tool, lines[1])
+		}
 	}
 	if got := text(2); !strings.HasPrefix(got, "memory: direct") || !strings.Contains(got, "PostgreSQL 16") {
 		t.Fatalf("recall: %s", got)

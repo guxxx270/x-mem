@@ -15,7 +15,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"x-mem/internal/capture"
 	"x-mem/internal/config"
+	"x-mem/internal/guard"
 	"x-mem/internal/index"
 	"x-mem/internal/inject"
 	"x-mem/internal/recall"
@@ -36,11 +38,17 @@ const OptOutMark = "#不记"
 
 // Input is the part of Claude Code's hook payload x-mem reads.
 type Input struct {
-	SessionID string `json:"session_id"`
-	Prompt    string `json:"prompt"`
-	Cwd       string `json:"cwd"`
-	Event     string `json:"hook_event_name"`
+	SessionID      string          `json:"session_id"`
+	Prompt         string          `json:"prompt"`
+	Cwd            string          `json:"cwd"`
+	Event          string          `json:"hook_event_name"`
+	TranscriptPath string          `json:"transcript_path"`
+	ToolName       string          `json:"tool_name"`
+	ToolInput      json.RawMessage `json:"tool_input"`
 }
+
+// GuardBudget is the most a PreToolUse reminder may add, in tokens.
+const GuardBudget = 800
 
 type output struct {
 	HookSpecificOutput struct {
@@ -51,6 +59,9 @@ type output struct {
 
 // Run executes one hook event. It returns what to print (possibly empty).
 func Run(event string, stdin io.Reader, now time.Time) string {
+	if os.Getenv("X_MEM_DISABLE") != "" { // x-mem's own host runs
+		return ""
+	}
 	var in Input
 	data, _ := io.ReadAll(io.LimitReader(stdin, 4<<20))
 	_ = json.Unmarshal(data, &in)
@@ -79,6 +90,10 @@ func run(event string, in Input, l config.Layers, now time.Time) (string, error)
 		return start(in, l, now)
 	case "prompt":
 		return prompt(in, l, now)
+	case "guard":
+		return guardHook(in, l)
+	case "stop":
+		return stop(in, l, now)
 	}
 	return "", fmt.Errorf("unknown hook event %q", event)
 }
@@ -172,6 +187,74 @@ func looksLikePaste(s string) bool {
 }
 
 func estimate(s string) int { return textutil.EstimateTokens(s) }
+
+// guardHook runs before every tool call. Rules whose trigger matches are
+// handed to the agent in full; a block rule refuses the call and says which
+// rule. No match, no output.
+func guardHook(in Input, l config.Layers) (string, error) {
+	if in.ToolName == "" {
+		return "", nil
+	}
+	ix, err := index.Open(l)
+	if err != nil {
+		return "", err
+	}
+	defer ix.Close()
+	var block, advise []*index.Doc
+	for _, d := range ix.Docs {
+		if !d.Active || len(d.Triggers) == 0 || inject.Suspicious(d) {
+			continue
+		}
+		for _, t := range d.Triggers {
+			if guard.Match(t, in.ToolName, in.ToolInput) {
+				if d.Enforcement == "block" {
+					block = append(block, d)
+				} else {
+					advise = append(advise, d)
+				}
+				break
+			}
+		}
+	}
+	if len(block) > 0 {
+		text := inject.GuardBlock("这个动作被用户的规则拦下了：", append(block, advise...), GuardBudget)
+		return guardReply("deny", text), nil
+	}
+	if len(advise) > 0 {
+		return guardReply("", inject.GuardBlock("执行这个动作前，用户有规则要你遵守：", advise, GuardBudget)), nil
+	}
+	return "", nil
+}
+
+func guardReply(decision, text string) string {
+	out := map[string]any{"hookEventName": "PreToolUse"}
+	if decision == "deny" {
+		out["permissionDecision"] = "deny"
+		out["permissionDecisionReason"] = text
+	} else {
+		out["additionalContext"] = text
+	}
+	data, _ := json.Marshal(map[string]any{"hookSpecificOutput": out})
+	return string(data)
+}
+
+// stop runs at the end of every turn. It only records that the session has
+// new lines and wakes the writer in the background; it reads nothing, so it
+// costs the same however long the session is.
+func stop(in Input, l config.Layers, now time.Time) (string, error) {
+	if !capture.LoadState(l).Enabled || in.TranscriptPath == "" {
+		return "", nil
+	}
+	if err := capture.AddSignal(l, capture.Signal{Path: in.TranscriptPath, Session: in.SessionID, At: now}); err != nil {
+		return "", err
+	}
+	if os.Getenv("X_MEM_NO_SPAWN") == "" {
+		if exe, err := os.Executable(); err == nil {
+			spawnDetached(exe, "writer", "--once")
+		}
+	}
+	return "", nil
+}
 
 func reply(event, ctx string) string {
 	var o output

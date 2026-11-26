@@ -96,4 +96,5 @@ fi
 step "检查"
 (cd "$HOME" && "$X" doctor) || true
 printf '\n完成。重开 Claude Code（和 Claude 桌面 App）后生效。\n'
+printf '会话自动采集默认关；想让它从对话里自动记决定，运行：%s capture on\n' "$X"
 printf '想在终端直接用 x-mem 命令，把这一行加进 ~/.zshrc：export PATH="$HOME/.x-mem/bin:$PATH"\n'

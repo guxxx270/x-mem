@@ -132,7 +132,11 @@ func StartBlock(rules, recent []*index.Doc, budget int) string {
 			s += "：" + sum
 		}
 		if len(d.Triggers) > 0 {
-			s += "（适用于 " + strings.Join(d.Triggers, "、") + "）"
+			if d.Enforcement == "block" {
+				s += "（执行 " + strings.Join(d.Triggers, "、") + " 会被拦下）"
+			} else {
+				s += "（执行 " + strings.Join(d.Triggers, "、") + " 前会再提醒）"
+			}
 		}
 		return s
 	})
@@ -146,3 +150,27 @@ func StartBlock(rules, recent []*index.Doc, budget int) string {
 // Suspicious reports whether a note's text looks like it tries to give the
 // agent orders. Such notes are never injected; doctor lists them.
 func Suspicious(d *index.Doc) bool { return d.Suspicious }
+
+// GuardBlock is what the PreToolUse hook hands over: the matching rules in
+// full, within a token budget.
+func GuardBlock(lead string, docs []*index.Doc, budget int) string {
+	var b strings.Builder
+	b.WriteString("<x-mem>\n" + Header + "\n" + lead + "\n")
+	used := textutil.EstimateTokens(b.String())
+	for i, d := range docs {
+		var part strings.Builder
+		fmt.Fprintf(&part, "\n[%d] %s\n", i+1, describe(d))
+		for _, l := range quoteLines(d, 12, 800) {
+			part.WriteString(l + "\n")
+		}
+		cost := textutil.EstimateTokens(part.String())
+		if used+cost > budget && i > 0 {
+			fmt.Fprintf(&b, "\n……还有 %d 条规则，用 read 看全文\n", len(docs)-i)
+			break
+		}
+		b.WriteString(part.String())
+		used += cost
+	}
+	b.WriteString("</x-mem>")
+	return b.String()
+}
