@@ -217,3 +217,16 @@ func strList(v any) []string {
 	}
 	return nil
 }
+
+// Frontmatter splits a Markdown file into its frontmatter fields and body.
+// ok is false when the file has no frontmatter block.
+func Frontmatter(src string) (fields map[string]any, body string, ok bool) {
+	fm, body, ok := splitFrontmatter(src)
+	if !ok {
+		return map[string]any{}, body, false
+	}
+	return parseYAML(fm), body, true
+}
+
+// String returns a frontmatter field as text ("" when absent or not text).
+func String(v any) string { return str(v) }

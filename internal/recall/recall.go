@@ -175,7 +175,7 @@ func Search(ix *index.Index, query string, opt Options) Result {
 			h.TitleCov = float64(h.TitleCovered) / float64(len(d.TitleUnits))
 		}
 		h.Tier, h.Why = decide(h)
-		h.Score = h.BM25 * (0.5 + h.Coverage) * recency(d.Updated, opt.Now)
+		h.Score = h.BM25 * (0.5 + h.Coverage) * (1 + 0.5*h.TitleCov) * recency(d.Updated, opt.Now)
 		if h.Phrase != "" {
 			h.Score += 100
 		}

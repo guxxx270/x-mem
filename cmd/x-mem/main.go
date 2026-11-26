@@ -38,7 +38,8 @@ const usage = `x-mem：给编程 agent 用的本地记忆（第一期：只读�
   x-mem eval <题集.json>          跑回归题集
   x-mem hook start|prompt         Claude Code 钩子（从标准输入读事件）
   x-mem mcp                       以 MCP 服务运行（stdio）
-  x-mem install claude-code       打印接入 Claude Code 要加的配置
+  x-mem import obsidian [库目录]   从 旧记忆库 库导入（--dry-run 先看会做什么）
+  x-mem install claude-code       打印接入 Claude Code 要加的配置（--apply 直接改，先备份）
   x-mem version
 
 环境变量：X_MEM_HOME 改个人层位置（默认 ~/.x-mem），X_MEM_PROJECT 指定项目层。
@@ -80,6 +81,8 @@ func main() {
 		err = mcp.Serve(os.Stdin, os.Stdout)
 	case "install":
 		err = cmdInstall(args)
+	case "import":
+		err = cmdImport(args)
 	case "version", "--version", "-v":
 		fmt.Println("x-mem", mcp.Version)
 	case "help", "--help", "-h":
@@ -386,33 +389,4 @@ func recentLogLines(path string, within time.Duration, max int) []string {
 		out = out[len(out)-max:]
 	}
 	return out
-}
-
-func cmdInstall(args []string) error {
-	if len(args) != 1 || args[0] != "claude-code" {
-		return fmt.Errorf("用法：x-mem install claude-code")
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "x-mem"
-	}
-	exe, _ = filepath.EvalSymlinks(exe)
-	hookCmd := func(ev string) map[string]any {
-		return map[string]any{"hooks": []map[string]any{{"type": "command", "command": exe + " hook " + ev, "timeout": 5}}}
-	}
-	snippet := map[string]any{"hooks": map[string]any{
-		"SessionStart":     []any{hookCmd("start")},
-		"UserPromptSubmit": []any{hookCmd("prompt")},
-	}}
-	data, _ := json.MarshalIndent(snippet, "", "  ")
-	fmt.Println("1. 把下面的 hooks 合并进 ~/.claude/settings.json（已有 hooks 时只加这两项，别覆盖）：")
-	fmt.Println()
-	fmt.Println(string(data))
-	fmt.Println()
-	fmt.Println("2. 注册 MCP 服务：")
-	fmt.Println()
-	fmt.Printf("   claude mcp add --scope user x-mem -- %s mcp\n\n", exe)
-	fmt.Println("3. 重开 Claude Code，运行 x-mem doctor 确认。")
-	fmt.Println("\nx-mem 不会替你改这些文件；第二期会加 --apply（先备份再合并）。")
-	return nil
 }

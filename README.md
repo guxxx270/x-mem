@@ -17,7 +17,23 @@ x-mem install claude-code              # 打印要加的 hooks 和 MCP 注册命
 x-mem doctor                           # 确认都接好了
 ```
 
-`install claude-code` 只打印配置：把输出里的两个 hooks 合并进 `~/.claude/settings.json`，再执行它给出的 `claude mcp add ...`。
+`install claude-code` 默认只打印配置；加 `--apply` 会先备份 `~/.claude/settings.json`，再写入两个钩子（重复运行不会重复添加），并用 `claude mcp add` 注册 MCP。
+
+### 从 旧记忆库 换过来
+
+```bash
+sh scripts/install.sh            # 库位置读 旧记忆库 的记录；也可以把库目录写在后面
+```
+
+脚本依次：安装 x-mem 到 `~/.x-mem/bin` → 建个人层 → 从 旧记忆库 库导入 → 接入 Claude Code（装了 codex 的话也给 Codex 注册 MCP）→ 运行 旧记忆库 自带的卸载脚本。旧记忆库 的库（Obsidian 笔记）和钥匙文件都不动。加 `--keep-legacy` 只导入、不停用 旧记忆库。
+
+单独导入：`x-mem import obsidian [库目录] --dry-run` 先看会写哪些文件，去掉 `--dry-run` 才写。导入规则：
+
+- 用户偏好页按条拆开，一条一个规则，放进 `rules/imported/`；
+- `01 项目`、`02 经验与方法` 等分区的其他页，一页一条笔记，放进 `notes/imported/`，保持原路径；
+- 旧记忆库 别名表里的别名带过来；从 Codex 会话自动提炼的页，只保留五个汉字以上的别名（短的英文别名、编号太泛，会误命中）；
+- 时间日志、会话摘录、`90 系统文件`、目录页、没改过的 旧记忆库 示例页不导入；
+- 已经存在的文件不覆盖（`--force` 才覆盖），所以重复运行没关系；个人层是 git 仓库时自动提交一次，可以 `git revert` 撤回。
 
 ## 目录
 
@@ -69,6 +85,7 @@ source:
 | `x-mem read <id\|文件名\|标题>` | 全文、状态、关系、谁引用了它；被取代的行会划掉 |
 | `x-mem status` / `doctor` | 库和索引的状态；体检并给出修复办法 |
 | `x-mem eval <题集.json>` | 跑回归题集 |
+| `x-mem import obsidian [库目录]` | 从 旧记忆库 库导入（`--dry-run` 先预演） |
 | `x-mem hook start\|prompt` | Claude Code 钩子（从标准输入读事件） |
 | `x-mem mcp` | MCP 服务（stdio），提供 `recall`、`read`、`status` 三个工具 |
 
@@ -102,6 +119,6 @@ go run ./tools/bench -bin bin/x-mem -notes 1000
 
 ## 后面几期
 
-- 第二期：写入（`remember` / `correct` 走收件箱、先给你看再落盘）、`install --apply`（先备份再合并配置）、从 旧记忆库 导入。
+- 第二期：写入（`remember` / `correct` 走收件箱、先给你看再落盘）。
 - 第三期：守卫（`triggers` + `enforcement`，在执行 `git push` 之类命令前提醒或拦截）。
 - 第四期：可选的向量召回、多 agent 支持。
