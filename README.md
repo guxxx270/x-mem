@@ -1,6 +1,6 @@
 # x-mem
 
-给编程 agent（先支持 Claude Code）用的本地记忆。笔记就是普通的 Markdown 文件，分个人层和项目层；x-mem 负责把和当前问题**直接相关**的那一两条找出来交给 agent，记忆里没有的时候老实说没有；你说过的决定可以记下来、纠正、撤回；规则能在动作执行前提醒或拦下。
+给编程 agent 用的本地记忆，**Claude Code、Codex、Antigravity 三端共用一份**。笔记就是普通的 Markdown 文件，分个人层和项目层；x-mem 负责把和当前问题**直接相关**的那一两条找出来交给 agent，记忆里没有的时候老实说没有；你说过的决定可以记下来、纠正、撤回；规则能在动作执行前提醒或拦下；Obsidian 库之类的资料文件夹可以登记成知识库，能查、带出处，但不算你定过的事。
 
 - 单个 Go 二进制，零外部依赖，不联网。x-mem 自己不调模型；需要提炼时借你已登录的 `claude`。
 - Markdown 是唯一的真相来源。索引只是缓存，随时可以删；手改笔记后下一次查询自动生效。
@@ -11,11 +11,28 @@
 ```bash
 go build -o ~/.x-mem/bin/x-mem ./cmd/x-mem   # 或者用 bin/ 里的预编译版本
 x-mem init                                   # 建 ~/.x-mem/personal，并在当前仓库建 .x-mem/
-x-mem install claude-code --apply            # 写入 4 个钩子（先备份 settings.json）并注册 MCP
+x-mem install all --apply                    # 本机装了哪个接哪个：Claude Code、Codex、Antigravity
 x-mem doctor                                 # 确认都接好了
 ```
 
-不加 `--apply` 只打印要加的配置，不改文件。重复运行 `--apply` 会替换旧的 x-mem 钩子，不会重复添加。
+不加 `--apply` 只列出要改什么，不改文件；改之前每个文件都先备份。重复运行会替换旧的 x-mem 条目，不会重复添加；`--remove` 拿掉。
+
+## 三端互通
+
+三个应用用的是同一个程序、同一份 `~/.x-mem`，在哪个应用里记下或纠正的，另外两个马上就能查到。项目层按工作目录找：钩子从应用拿到当前目录；MCP 工具多了一个 `workspace` 参数，应用把工作区路径传进来。
+
+| | Claude Code | Codex | Antigravity |
+|---|---|---|---|
+| 配置位置 | `~/.claude/settings.json` | `~/.codex/hooks.json`、`config.toml`、`AGENTS.md` | `~/.gemini/config/hooks.json`、`mcp_config.json`、`AGENTS.md` |
+| 会话开始给目录 | SessionStart | SessionStart | SessionStart |
+| 每条消息想起 | UserPromptSubmit | UserPromptSubmit | PreInvocation（它没有提交消息的钩子；每条消息只处理一次） |
+| 动作前规则 | PreToolUse：提醒注入上下文，block 拒绝 | 同左（`apply_patch` 按 Edit 匹配） | PreToolUse：block 拒绝；它不能在动作前加上下文，所以提醒规则是“先拦一次、把规则给 agent，再执行就放行” |
+| 会话采集 | Stop | Stop | Stop |
+| MCP（recall / read / propose / status） | `claude mcp add` | `codex mcp add` | `mcp_config.json` |
+
+- **Codex** 只运行你信任过的钩子：装好后在 Codex 里输入 `/hooks` 信任一次。
+- 规则的触发条件三端通用：`Bash(git push*)` 在 Codex 里匹配它的 shell，在 Antigravity 里匹配 `run_command`；`Edit(*.sql)` 也匹配 Codex 的 `apply_patch` 和 Antigravity 的改文件工具。
+- 原话核对和会话采集读三家各自的会话文件（`~/.claude/projects`、`~/.codex/sessions`、`~/.gemini/antigravity*/brain`），自动跳过 `claude -p`、`codex exec` 这类无头运行。
 
 ### 从 旧记忆库 换过来
 
@@ -23,7 +40,7 @@ x-mem doctor                                 # 确认都接好了
 sh scripts/install.sh ~/Documents/知识库
 ```
 
-依次：安装到 `~/.x-mem/bin` → 建个人层 → 从 旧记忆库 库导入 → 接入 Claude Code（装了 codex 也注册 MCP）→ 运行 旧记忆库 自带的卸载脚本。旧记忆库 的库和钥匙文件都不动。加 `--keep-legacy` 只导入、不停用。
+依次：安装到 `~/.x-mem/bin` → 建个人层 → 从 旧记忆库 库导入 → 库里没导入的部分（时间日志、会话摘录、资料）登记成知识库 → 接入三端 → 运行 旧记忆库 自带的卸载脚本，并清掉它在 Antigravity 里的条目。旧记忆库 的库和钥匙文件都不动。加 `--keep-legacy` 只导入、不停用。
 
 导入规则（也可单独运行 `x-mem import obsidian [库目录] --dry-run` 预演）：
 
@@ -114,6 +131,22 @@ x-mem capture off
 - 候选交给你已登录的 `claude -p` 起一个不带工具的子任务提炼（x-mem 自己不调模型）；没有可用的 `claude` 时，原句直接进 inbox。
 - 采集来的提案**默认都等你确认**（`x-mem inbox`）；`config.json` 里 `"auto_apply_capture": true` 可以改成自动写入。
 
+## 想起来：目录、直接依据、联想
+
+- **会话开始**：给出规则与偏好、本项目最近的决定，以及**记忆目录**——其余每条笔记的标题和别名（约 1500 token 以内，项目层和最近改过的优先）。人说话往往不点名字，agent 看到目录里有相关的主题，会自己去取。
+- **每条消息**：只在有直接依据时递一两条，无关的话一个字不加。
+- **recall 的回答**：除了命中的笔记，还会带出和它们有关联的笔记（关系、`[[链接]]`、同一段会话来的），最多 2 条；以及知识库里对得上的资料，单独一块、标明不是你定过的事。
+
+## 知识库
+
+```bash
+x-mem kb add ~/Documents/知识库 --exclude "01 项目" --exclude "02 经验与方法"
+x-mem kb list
+x-mem kb remove <目录>
+```
+
+知识库里的页能被 recall 查到、带出处，但**不算记忆**：不影响 direct / related / none 的判断，不进钩子注入，不能被取代，也从不写入。只有知识库对得上时，回答第一行是 `memory: none`，下面列出资料；旧记忆库 留下的会话摘录会标成“会话摘录：结论是模型提炼的，未经确认”。
+
 ## 钩子做什么
 
 | 钩子 | 做什么 |
@@ -127,7 +160,7 @@ x-mem capture off
 
 ## MCP 工具
 
-`recall`（查，第一行是 direct / related / none）、`read`（全文和关系）、`propose`（提案，唯一的写入口，必须带原话）、`status`。
+`recall`（查，第一行是 direct / related / none）、`read`（全文和关系）、`propose`（提案，唯一的写入口，必须带原话）、`status`。都可以带 `workspace`（工作区路径），用来找到项目层。
 
 ## config.json（都可省略）
 
@@ -136,7 +169,8 @@ x-mem capture off
   "commit_project": false,
   "auto_apply_capture": false,
   "host": ["claude", "-p"],
-  "quote_window_hours": 72
+  "quote_window_hours": 72,
+  "kb": [{"path": "/Users/you/Documents/知识库", "exclude": ["01 项目", "02 经验与方法"]}]
 }
 ```
 
@@ -173,6 +207,22 @@ go run ./tools/bench -bin bin/x-mem -notes 1000
 - **提案放在 `state/inbox`**，不放在层目录的 `inbox/`：提案可能带未审核的内容，不该进项目仓库的 git。层目录的 `inbox/` 留给你自己放草稿。
 - **项目层不自动提交**、**采集来的提案默认等你确认**：都可以在 `config.json` 里打开。
 
+## 和 旧记忆库 的对照
+
+| 旧记忆库 的能力 | x-mem |
+|---|---|
+| 提到就想起（每句话 + 会话开始的索引） | 有：每条消息只递 direct；会话开始给规则和记忆目录；三端都有 |
+| 联想到相关的一片 | 有：recall 带出有关联的笔记（关系、链接、同一段会话） |
+| 托底：出处、三档、改了主意只认新的 | 有，并修了 旧记忆库 的整页作废、撤回撞车、别名被否决、脱敏漏网 |
+| 你的知识库（参考资料单独列） | 有：`x-mem kb` |
+| 纠正、写入、撤回 | 有：先提案、核对原话、单写入、按次撤回 |
+| 会话采集与提炼 | 有：默认关，三端都读，提炼的结果等你确认才写入 |
+| 规则在动作前触发 | 有（旧记忆库 只在 Cursor 上有执行前拦截） |
+| 夜间自动整理、自动写日更 / 时间日志 | 没做：设计上不做不经你确认的自动改写 |
+| 经验长成技能、60 天没用的往后排 | 没做：只有最近改过的稍靠前 |
+| 团队服务、Cursor 等其他应用 | 没做；任何支持 MCP 的应用都能手动接 `x-mem mcp` |
+| PDF / Word 转进知识库 | 没做 |
+
 ## 之后再评估
 
-Codex 会话采集、词典分词、向量检索：每一项都要在回归题集上证明有提升才加。
+词典分词、向量检索：都要在回归题集上证明有提升才加。

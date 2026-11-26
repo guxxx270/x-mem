@@ -61,18 +61,27 @@ type Hit struct {
 
 // Options narrows a search.
 type Options struct {
-	Scope string // "", "all", "personal" or "project"
-	Limit int
-	Now   time.Time
+	Scope     string // "", "all", "personal" or "project"
+	Limit     int
+	Now       time.Time
+	NoRelated bool // hooks: only what the message is about
 }
 
 // Result is the answer to one question.
 type Result struct {
-	Query string
-	Tier  Tier
-	Units []textutil.Unit
-	Hits  []Hit
+	Query   string
+	Tier    Tier
+	Units   []textutil.Unit
+	Hits    []Hit        // your memory
+	Related []*index.Doc // notes tied to the answer (relations, links, same conversation)
+	KB      []Hit        // reference material from knowledge-base folders; never sets Tier
 }
+
+// MaxRelated and MaxKB bound what a recall answer adds beside the hits.
+const (
+	MaxRelated = 2
+	MaxKB      = 3
+)
 
 // Search ranks the notes in force for a question.
 func Search(ix *index.Index, query string, opt Options) Result {
@@ -181,23 +190,67 @@ func Search(ix *index.Index, query string, opt Options) Result {
 		}
 		hits = append(hits, h)
 	}
-	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].Tier != hits[j].Tier {
-			return hits[i].Tier > hits[j].Tier
-		}
-		if hits[i].Score != hits[j].Score {
-			return hits[i].Score > hits[j].Score
-		}
-		return hits[i].Doc.Rel < hits[j].Doc.Rel
-	})
-	if len(hits) > opt.Limit {
-		hits = hits[:opt.Limit]
+	byRank := func(hs []Hit) {
+		sort.Slice(hs, func(i, j int) bool {
+			if hs[i].Tier != hs[j].Tier {
+				return hs[i].Tier > hs[j].Tier
+			}
+			if hs[i].Score != hs[j].Score {
+				return hs[i].Score > hs[j].Score
+			}
+			return hs[i].Doc.Rel < hs[j].Doc.Rel
+		})
 	}
-	res.Hits = hits
-	if len(hits) > 0 {
-		res.Tier = hits[0].Tier
+	var mem, kb []Hit
+	for _, h := range hits {
+		if h.Doc.Layer == "kb" {
+			if h.Tier != None {
+				kb = append(kb, h)
+			}
+		} else {
+			mem = append(mem, h)
+		}
+	}
+	byRank(mem)
+	byRank(kb)
+	if len(mem) > opt.Limit {
+		mem = mem[:opt.Limit]
+	}
+	if len(kb) > MaxKB {
+		kb = kb[:MaxKB]
+	}
+	res.Hits, res.KB = mem, kb
+	if len(mem) > 0 {
+		res.Tier = mem[0].Tier
+	}
+	if !opt.NoRelated && res.Tier != None {
+		res.Related = related(ix, mem, res.Tier)
 	}
 	return res
+}
+
+// related follows the answer's ties to notes the question did not name:
+// 旧记忆库's "a whole patch comes to mind", from the store's own links.
+func related(ix *index.Index, hits []Hit, tier Tier) []*index.Doc {
+	shown := map[*index.Doc]bool{}
+	for _, h := range hits {
+		if h.Tier == tier { // what the answer lists
+			shown[h.Doc] = true
+		}
+	}
+	var out []*index.Doc
+	for i, h := range hits {
+		if i >= 2 || h.Tier != tier {
+			break
+		}
+		for _, n := range ix.Neighbours(h.Doc) {
+			if !shown[n] && len(out) < MaxRelated {
+				shown[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out
 }
 
 func decide(h Hit) (Tier, string) {

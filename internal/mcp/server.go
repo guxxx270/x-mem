@@ -21,7 +21,7 @@ import (
 )
 
 // Version is reported to clients.
-var Version = "0.3.0"
+var Version = "0.4.0"
 
 type request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -42,6 +42,10 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
+// workspaceProp lets agents whose MCP servers do not run in the project
+// folder (Antigravity, sometimes Codex) say which project they are in.
+var workspaceProp = map[string]any{"type": "string", "description": "当前工作区（项目）的绝对路径；用来找到项目层的记忆。Claude Code 里可以不填"}
+
 var tools = []map[string]any{
 	{
 		"name": "recall",
@@ -50,8 +54,9 @@ var tools = []map[string]any{
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"query": map[string]any{"type": "string", "description": "用用户自己的话描述要查的事"},
-				"scope": map[string]any{"type": "string", "enum": []string{"all", "personal", "project"}, "description": "默认 all"},
+				"query":     map[string]any{"type": "string", "description": "用用户自己的话描述要查的事"},
+				"scope":     map[string]any{"type": "string", "enum": []string{"all", "personal", "project"}, "description": "默认 all"},
+				"workspace": workspaceProp,
 			},
 			"required": []string{"query"},
 		},
@@ -61,7 +66,7 @@ var tools = []map[string]any{
 		"description": "读一条笔记的全文和它与其他笔记的关系（谁取代了它、它取代了谁）。参数用 recall 返回的 id。",
 		"inputSchema": map[string]any{
 			"type":       "object",
-			"properties": map[string]any{"id": map[string]any{"type": "string", "description": "笔记 id、文件名或标题"}},
+			"properties": map[string]any{"id": map[string]any{"type": "string", "description": "笔记 id、文件名或标题"}, "workspace": workspaceProp},
 			"required":   []string{"id"},
 		},
 	},
@@ -85,6 +90,7 @@ var tools = []map[string]any{
 				"aliases":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "用户会怎么称呼这件事"},
 				"triggers":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "仅规则：在哪些动作前提醒，如 Bash(git push*)"},
 				"enforcement": map[string]any{"type": "string", "enum": []string{"advise", "block"}, "description": "仅规则：advise 提醒，block 拦下"},
+				"workspace":   workspaceProp,
 			},
 			"required": []string{"text", "quote"},
 		},
@@ -92,7 +98,7 @@ var tools = []map[string]any{
 	{
 		"name":        "status",
 		"description": "x-mem 的状态：用的是哪几个库、各有多少条笔记、有没有需要修的问题。",
-		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{"workspace": workspaceProp}},
 	},
 }
 
@@ -185,6 +191,11 @@ func list(args map[string]any, k string) []string {
 
 func call(name string, args map[string]any) (string, bool) {
 	cwd, _ := os.Getwd()
+	if ws := str(args, "workspace"); ws != "" {
+		if st, err := os.Stat(ws); err == nil && st.IsDir() {
+			cwd = ws
+		}
+	}
 	l, err := config.Resolve(cwd)
 	if err != nil {
 		return err.Error(), true
@@ -290,13 +301,21 @@ func Status(l config.Layers, ix *index.Index) string {
 			c[1]++
 		}
 		counts[d.Layer] = c
-		problems += len(d.Problems) + len(d.NoteProblems)
+		if d.Layer != "kb" {
+			problems += len(d.Problems) + len(d.NoteProblems)
+		}
 	}
 	fmt.Fprintf(&b, "个人层：%s（%d 条笔记，%d 条生效）\n", l.Personal, counts["personal"][0], counts["personal"][1])
 	if l.Project != "" {
 		fmt.Fprintf(&b, "项目层：%s（%d 条笔记，%d 条生效）\n", l.Project, counts["project"][0], counts["project"][1])
 	} else {
 		b.WriteString("项目层：当前目录不在任何带 .x-mem 的项目里\n")
+	}
+	for _, k := range l.KB {
+		fmt.Fprintf(&b, "知识库：%s（参考资料，可以查，不算记忆）\n", k.Path)
+	}
+	if n := counts["kb"][0]; n > 0 {
+		fmt.Fprintf(&b, "知识库共 %d 页\n", n)
 	}
 	fmt.Fprintf(&b, "索引：%s（%s 更新）\n", l.State, ix.Day)
 	if problems > 0 {

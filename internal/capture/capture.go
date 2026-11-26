@@ -41,7 +41,9 @@ type State struct {
 type cursor struct {
 	Offset   int64  `json:"offset"`
 	Excluded bool   `json:"excluded,omitempty"` // the session said #不记
-	Session  string `json:"session,omitempty"`
+	Headless bool   `json:"headless,omitempty"` // automation, not a person
+	Session  string `json:"session,omitempty"`  // "<client>:<id>"
+	Cwd      string `json:"cwd,omitempty"`
 }
 
 func statePath(l config.Layers) string         { return filepath.Join(l.State, "capture.json") }
@@ -54,6 +56,7 @@ func SaveState(l config.Layers, s State) error { return writeJSON(statePath(l), 
 type Signal struct {
 	Path    string    `json:"path"`
 	Session string    `json:"session,omitempty"`
+	Cwd     string    `json:"cwd,omitempty"` // Antigravity's files carry no folder
 	At      time.Time `json:"at"`
 }
 
@@ -121,8 +124,12 @@ func Run(l config.Layers, w *writer.Writer, now time.Time) (int, error) {
 		return 0, err
 	}
 	files := map[string]bool{}
+	cwds := map[string]string{}
 	for _, s := range takeSignals(l) {
 		files[s.Path] = true
+		if s.Cwd != "" {
+			cwds[s.Path] = s.Cwd
+		}
 	}
 	if now.Sub(st.LastScan) >= ScanEvery {
 		since := st.LastScan
@@ -147,6 +154,9 @@ func Run(l config.Layers, w *writer.Writer, now time.Time) (int, error) {
 			if info, err := os.Stat(path); err == nil && !st.Since.IsZero() && info.ModTime().Before(st.Since) {
 				c.Offset = info.Size()
 			}
+		}
+		if c.Cwd == "" {
+			c.Cwd = cwds[path]
 		}
 		got, excluded := readNew(l, st, path, c)
 		if excluded {
@@ -174,7 +184,7 @@ func Run(l config.Layers, w *writer.Writer, now time.Time) (int, error) {
 
 // readNew reads one session file from its cursor.
 func readNew(l config.Layers, st State, path string, c *cursor) ([]Candidate, bool) {
-	if c.Excluded {
+	if c.Excluded || c.Headless {
 		if info, err := os.Stat(path); err == nil {
 			c.Offset = info.Size()
 		}
@@ -185,26 +195,44 @@ func readNew(l config.Layers, st State, path string, c *cursor) ([]Candidate, bo
 		return nil, false
 	}
 	c.Offset = next
+	client := transcript.ClientOf(path)
 	var out []Candidate
 	lastReply := ""
 	for _, m := range msgs {
-		if c.Session == "" && m.Session != "" {
-			c.Session = "claude:" + m.Session
-		}
-		if m.Role == "assistant" {
+		switch m.Role {
+		case "meta":
+			if m.Headless {
+				c.Headless = true
+				return nil, false
+			}
+			if m.Cwd != "" {
+				c.Cwd = m.Cwd
+			}
+			if m.Session != "" {
+				c.Session = client + ":" + m.Session
+			}
+			continue
+		case "assistant":
 			lastReply = m.Text
 			continue
+		}
+		if c.Session == "" && m.Session != "" {
+			c.Session = client + ":" + m.Session
 		}
 		if strings.Contains(m.Text, OptOut) {
 			c.Excluded = true
 			return nil, true
 		}
-		if skipCwd(l, st, m.Cwd) || before(m.Time, st.Since) {
+		cwd := m.Cwd
+		if cwd == "" {
+			cwd = c.Cwd
+		}
+		if skipCwd(l, st, cwd) || before(m.Time, st.Since) {
 			continue
 		}
 		for _, s := range Candidates(m.Text) {
 			out = append(out, Candidate{Sentence: s, Message: m.Text, Context: cutRunes(lastReply, 300),
-				Session: c.Session, Cwd: m.Cwd, Time: m.Time})
+				Session: c.Session, Cwd: cwd, Time: m.Time})
 		}
 	}
 	return out, false

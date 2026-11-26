@@ -28,7 +28,7 @@ import (
 	"x-mem/internal/textutil"
 )
 
-const formatVersion = 5
+const formatVersion = 6
 
 // Field weights: a term in the title or an alias counts three times a term in
 // the body.
@@ -44,6 +44,8 @@ type Doc struct {
 	ID, Title, Type, Layer, Rel, Path string
 	Aliases, Triggers                 []string
 	Enforcement, Sensitivity          string
+	Links                             []string // [[wiki links]] in the body
+	Session                           string   // source.session: the conversation it came from
 	Relations                         []note.Relation
 	Size, MTime                       int64
 
@@ -146,8 +148,11 @@ func scan(l config.Layers) ([]sig, error) {
 				return nil
 			}
 			if de.IsDir() {
-				if p != root.Dir && config.SkipDir(de.Name()) {
-					return filepath.SkipDir
+				if p != root.Dir {
+					rel, _ := filepath.Rel(root.Dir, p)
+					if config.SkipDir(de.Name()) || root.Excluded(rel) {
+						return filepath.SkipDir
+					}
 				}
 				return nil
 			}
@@ -159,6 +164,9 @@ func scan(l config.Layers) ([]sig, error) {
 				return nil
 			}
 			rel, _ := filepath.Rel(root.Dir, p)
+			if root.Excluded(rel) {
+				return nil
+			}
 			out = append(out, sig{root.Name, filepath.ToSlash(rel), p, info.Size(), info.ModTime().UnixNano()})
 			return nil
 		})
@@ -213,6 +221,7 @@ func build(l config.Layers, sigs []sig, today string) (*Index, error) {
 			ID: n.ID, Title: n.Title, Type: n.Type, Layer: s.layer, Rel: n.Rel, Path: s.path,
 			Aliases: n.Aliases, Triggers: n.Triggers, Relations: n.Relations,
 			Enforcement: n.Enforcement, Sensitivity: n.Sensitivity,
+			Links: n.Links(), Session: n.SourceSession,
 			Size: s.size, MTime: s.mtime, NoteProblems: n.Problems,
 			Suspicious: note.Suspicious(n.Title + "\n" + n.Body),
 			note:       n,
@@ -360,8 +369,8 @@ func (ix *Index) link(today string) {
 		}
 	}
 	for _, d := range ix.Docs {
-		if d.note.Status == "draft" {
-			continue
+		if d.note.Status == "draft" || d.Layer == "kb" {
+			continue // reference material never changes what holds in memory
 		}
 		for _, r := range d.Relations {
 			t := ix.Lookup(r.Target)
@@ -371,6 +380,9 @@ func (ix *Index) link(today string) {
 				continue
 			case t == d:
 				d.Problems = append(d.Problems, fmt.Sprintf("%s 指向了自己", r.Op))
+				continue
+			case t.Layer == "kb":
+				d.Problems = append(d.Problems, fmt.Sprintf("%s 指向的「%s」是知识库里的资料，不是记忆", r.Op, t.Title))
 				continue
 			}
 			switch r.Op {
@@ -614,6 +626,48 @@ func (ix *Index) Postings(t string) []Posting {
 			Doc: int(binary.LittleEndian.Uint32(raw[k : k+4])),
 			TF:  math.Float32frombits(binary.LittleEndian.Uint32(raw[k+4 : k+8])),
 		})
+	}
+	return out
+}
+
+// Neighbours are the notes in force that a note is tied to: by a relation
+// either way, a [[wiki link]] either way, or the same source conversation.
+// Superseded notes lead to the note that replaced them.
+func (ix *Index) Neighbours(d *Doc) []*Doc {
+	var out []*Doc
+	seen := map[*Doc]bool{d: true}
+	add := func(t *Doc) {
+		for t != nil && !t.Active && t.SupersededBy != "" {
+			t = ix.Lookup(t.SupersededBy)
+		}
+		if t != nil && !seen[t] && t.Active && t.Layer != "kb" {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	for _, r := range d.Relations {
+		add(ix.Lookup(r.Target))
+	}
+	for _, l := range d.Links {
+		add(ix.Lookup(l))
+	}
+	for _, o := range ix.Docs {
+		if o == d || o.Layer == "kb" {
+			continue
+		}
+		for _, r := range o.Relations {
+			if t := ix.Lookup(r.Target); t == d {
+				add(o)
+			}
+		}
+		for _, l := range o.Links {
+			if t := ix.Lookup(l); t == d {
+				add(o)
+			}
+		}
+		if d.Session != "" && o.Session == d.Session {
+			add(o)
+		}
 	}
 	return out
 }

@@ -57,6 +57,8 @@ type Proposal struct {
 	Redacted   []string `json:"redacted,omitempty"`
 	Run        string   `json:"run,omitempty"`
 	Note       string   `json:"note,omitempty"` // the file written
+
+	quoteFound bool // the quote was already found in a session file
 }
 
 // Inbox is where proposals wait. It lives in the state folder, never in git.

@@ -97,6 +97,16 @@ func (w *Writer) Submit(p *Proposal) (*Proposal, error) {
 	if p.Source == "" {
 		p.Source = "cli"
 	}
+	// An agent's MCP server may run outside the project: the session the
+	// quote came from says which folder the user was working in.
+	if p.Source == "mcp" && len([]rune(transcript.Norm(p.Quote))) >= 4 {
+		if f, ok := w.FindQuote(p.Quote, time.Duration(w.Settings.QuoteWindowHours)*time.Hour); ok {
+			p.Session, p.QuoteAt, p.quoteFound = f.Session, f.Time, true
+			if p.Project == "" && f.Cwd != "" {
+				p.Project = config.FindProject(f.Cwd, w.L.Home)
+			}
+		}
+	}
 	w.normalize(p)
 	ix, err := index.Open(w.layers(p))
 	if err != nil {
@@ -231,6 +241,8 @@ func (w *Writer) check(p *Proposal, ix *index.Index, verifyQuote bool) []string 
 		switch {
 		case target == nil:
 			add("要%s的笔记 %q 找不到（用 id、文件名或标题）", opName(p.Relation), p.Supersedes)
+		case target.Layer == "kb":
+			add("「%s」是知识库里的参考资料，不是记忆，不能被%s", target.Title, opName(p.Relation))
 		case target.SupersededBy != "":
 			add("「%s」已经被 %s 取代了，应该针对现在生效的那条", target.Title, target.SupersededBy)
 		case p.Line != "" && p.Relation != "@supersedes" && p.Relation != "@deprecated":
@@ -247,6 +259,8 @@ func (w *Writer) check(p *Proposal, ix *index.Index, verifyQuote bool) []string 
 		case "mcp":
 			if len([]rune(transcript.Norm(p.Quote))) < 4 {
 				add("缺少你的原话（quote）：自动写入必须带上你在会话里说过的话")
+			} else if p.quoteFound {
+				// found in Submit
 			} else if f, ok := w.FindQuote(p.Quote, time.Duration(w.Settings.QuoteWindowHours)*time.Hour); !ok {
 				add("原话在最近的会话记录里找不到，不写入：%s", cut(p.Quote, 40))
 			} else {
@@ -264,7 +278,7 @@ func (w *Writer) check(p *Proposal, ix *index.Index, verifyQuote bool) []string 
 	if p.Source == "capture" && !w.Settings.AutoApplyCapture {
 		p.Review = "从会话里自动采集的，确认后才写入"
 	}
-	res := recall.Search(ix, p.Title+"\n"+p.Text, recall.Options{Limit: 3, Now: w.Now()})
+	res := recall.Search(ix, p.Title+"\n"+p.Text, recall.Options{Limit: 3, Now: w.Now(), NoRelated: true})
 	for _, h := range res.Hits {
 		if h.Tier != recall.Direct || h.Doc == target {
 			continue

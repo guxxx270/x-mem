@@ -4,6 +4,7 @@
 package hook
 
 import (
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,6 +46,7 @@ type Input struct {
 	TranscriptPath string          `json:"transcript_path"`
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
+	Client         string          `json:"-"`
 }
 
 // GuardBudget is the most a PreToolUse reminder may add, in tokens.
@@ -57,28 +59,66 @@ type output struct {
 	} `json:"hookSpecificOutput"`
 }
 
-// Run executes one hook event. It returns what to print (possibly empty).
+// Run executes one Claude Code hook event. It returns what to print
+// (possibly empty).
 func Run(event string, stdin io.Reader, now time.Time) string {
+	return RunAs(Claude, event, stdin, now)
+}
+
+// Clients whose hooks x-mem speaks.
+const (
+	Claude      = "claude"
+	Codex       = "codex"
+	Antigravity = "antigravity"
+)
+
+// RunAs executes one hook event for a client. Codex uses Claude Code's
+// format; Antigravity's is translated on the way in and out.
+func RunAs(client, event string, stdin io.Reader, now time.Time) string {
 	if os.Getenv("X_MEM_DISABLE") != "" { // x-mem's own host runs
-		return ""
+		return quiet(client)
 	}
-	var in Input
 	data, _ := io.ReadAll(io.LimitReader(stdin, 4<<20))
-	_ = json.Unmarshal(data, &in)
+	var in Input
+	if client == Antigravity {
+		in = fromAntigravity(data)
+	} else {
+		_ = json.Unmarshal(data, &in)
+	}
+	in.Client = client
+	if in.Client == Codex {
+		if in.SessionID != "" {
+			in.SessionID = "codex-" + in.SessionID
+		}
+		if in.ToolName == "apply_patch" {
+			in.ToolName, in.ToolInput = patchTool(in.ToolInput)
+		}
+	}
 	cwd := in.Cwd
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
 	l, err := config.Resolve(cwd)
 	if err != nil {
-		return ""
+		return quiet(client)
 	}
 	out, err := run(event, in, l, now)
 	if err != nil {
-		logErr(l, event, err)
-		return ""
+		logErr(l, client+" "+event, err)
+		return quiet(client)
+	}
+	if client == Antigravity {
+		return toAntigravity(out)
 	}
 	return out
+}
+
+// quiet is the reply that changes nothing.
+func quiet(client string) string {
+	if client == Antigravity {
+		return "{}"
+	}
+	return ""
 }
 
 func run(event string, in Input, l config.Layers, now time.Time) (string, error) {
@@ -105,8 +145,9 @@ func start(in Input, l config.Layers, now time.Time) (string, error) {
 	}
 	var rules, recent []*index.Doc
 	cutoff := now.AddDate(0, 0, -30).Format("2006-01-02")
+	var others []*index.Doc
 	for _, d := range ix.Docs {
-		if !d.Active || inject.Suspicious(d) {
+		if !d.Active || d.Layer == "kb" || inject.Suspicious(d) {
 			continue
 		}
 		switch {
@@ -114,18 +155,38 @@ func start(in Input, l config.Layers, now time.Time) (string, error) {
 			rules = append(rules, d)
 		case d.Layer == "project" && d.Type == "decision" && d.Updated >= cutoff:
 			recent = append(recent, d)
+		default:
+			others = append(others, d)
 		}
 	}
-	if len(rules) == 0 && len(recent) == 0 {
+	if len(rules) == 0 && len(recent) == 0 && len(others) == 0 {
 		return "", nil
 	}
 	sort.SliceStable(rules, func(i, j int) bool { return rules[i].Layer > rules[j].Layer })
 	sort.SliceStable(recent, func(i, j int) bool { return recent[i].Updated > recent[j].Updated })
-	return reply("SessionStart", inject.StartBlock(rules, recent, StartBudget)), nil
+	// The catalog: everything else, project first, then the most recently
+	// changed, so what is left out when the budget runs short is the oldest.
+	sort.SliceStable(others, func(i, j int) bool {
+		if others[i].Layer != others[j].Layer {
+			return others[i].Layer > others[j].Layer
+		}
+		return others[i].Updated > others[j].Updated
+	})
+	return reply("SessionStart", inject.StartBlock(rules, recent, others, StartBudget)), nil
 }
 
 func prompt(in Input, l config.Layers, now time.Time) (string, error) {
 	st := loadSession(l, in.SessionID)
+	if in.Client == Antigravity {
+		// PreInvocation runs before every model call of a turn: handle each
+		// message the user sends once.
+		key := fmt.Sprintf("%x", sha1.Sum([]byte(in.Prompt)))
+		if in.Prompt == "" || st.LastPrompt == key {
+			return "", nil
+		}
+		st.LastPrompt = key
+		_ = saveSession(l, in.SessionID, st)
+	}
 	if strings.Contains(in.Prompt, OptOutMark) {
 		st.OptOut = true
 		return "", saveSession(l, in.SessionID, st)
@@ -137,7 +198,7 @@ func prompt(in Input, l config.Layers, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	res := recall.Search(ix, in.Prompt, recall.Options{Limit: 5, Now: now})
+	res := recall.Search(ix, in.Prompt, recall.Options{Limit: 5, Now: now, NoRelated: true})
 	if res.Tier != recall.Direct {
 		return "", nil
 	}
@@ -202,7 +263,7 @@ func guardHook(in Input, l config.Layers) (string, error) {
 	defer ix.Close()
 	var block, advise []*index.Doc
 	for _, d := range ix.Docs {
-		if !d.Active || len(d.Triggers) == 0 || inject.Suspicious(d) {
+		if !d.Active || d.Layer == "kb" || len(d.Triggers) == 0 || inject.Suspicious(d) {
 			continue
 		}
 		for _, t := range d.Triggers {
@@ -221,7 +282,26 @@ func guardHook(in Input, l config.Layers) (string, error) {
 		return guardReply("deny", text), nil
 	}
 	if len(advise) > 0 {
-		return guardReply("", inject.GuardBlock("执行这个动作前，用户有规则要你遵守：", advise, GuardBudget)), nil
+		if in.Client != Antigravity {
+			return guardReply("", inject.GuardBlock("执行这个动作前，用户有规则要你遵守：", advise, GuardBudget)), nil
+		}
+		// Antigravity cannot add context before a tool call. Stop the call
+		// once per rule and conversation with the rule as the reason; the
+		// agent reads it and runs the call again, which then goes through.
+		st := loadSession(l, in.SessionID)
+		var fresh []*index.Doc
+		for _, d := range advise {
+			if !st.Advised[d.ID] {
+				fresh = append(fresh, d)
+				st.Advised[d.ID] = true
+			}
+		}
+		if len(fresh) == 0 {
+			return "", nil
+		}
+		_ = saveSession(l, in.SessionID, st)
+		text := inject.GuardBlock("执行这个动作前，用户有规则要你遵守（这是提醒，不是禁止：照规则做完后重新执行同一个动作即可）：", fresh, GuardBudget)
+		return guardReply("deny", text), nil
 	}
 	return "", nil
 }
@@ -245,7 +325,7 @@ func stop(in Input, l config.Layers, now time.Time) (string, error) {
 	if !capture.LoadState(l).Enabled || in.TranscriptPath == "" {
 		return "", nil
 	}
-	if err := capture.AddSignal(l, capture.Signal{Path: in.TranscriptPath, Session: in.SessionID, At: now}); err != nil {
+	if err := capture.AddSignal(l, capture.Signal{Path: in.TranscriptPath, Session: in.SessionID, Cwd: in.Cwd, At: now}); err != nil {
 		return "", err
 	}
 	if os.Getenv("X_MEM_NO_SPAWN") == "" {
@@ -265,8 +345,10 @@ func reply(event, ctx string) string {
 }
 
 type session struct {
-	OptOut   bool            `json:"opt_out"`
-	Injected map[string]bool `json:"injected"`
+	OptOut     bool            `json:"opt_out"`
+	Injected   map[string]bool `json:"injected"`
+	Advised    map[string]bool `json:"advised,omitempty"`     // Antigravity: rules already shown before a tool call
+	LastPrompt string          `json:"last_prompt,omitempty"` // Antigravity: the input already handled
 }
 
 var safeID = regexp.MustCompile(`[^A-Za-z0-9_\-]`)
@@ -285,6 +367,9 @@ func loadSession(l config.Layers, id string) session {
 	}
 	if st.Injected == nil {
 		st.Injected = map[string]bool{}
+	}
+	if st.Advised == nil {
+		st.Advised = map[string]bool{}
 	}
 	return st
 }

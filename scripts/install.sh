@@ -2,8 +2,8 @@
 # 从 旧记忆库 换到 x-mem（macOS / Linux）。按顺序做五件事：
 #   1. 把 x-mem 装到 ~/.x-mem/bin
 #   2. 建个人层 ~/.x-mem/personal
-#   3. 从 旧记忆库 库导入（只读库，不改库）
-#   4. 接入 Claude Code（钩子 + MCP，settings.json 先备份）；装了 codex 的话也给 Codex 注册 MCP
+#   3. 从 旧记忆库 库导入（只读库，不改库）；没导入的时间日志、会话摘录、资料登记成知识库，照样能查
+#   4. 接入 Claude Code、Codex、Antigravity（钩子 + MCP + 说明，改之前先备份）
 #   5. 运行 旧记忆库 自带的卸载脚本：停定时任务、删钩子/插件/MCP 登记；库和钥匙文件不动
 # 用法：sh scripts/install.sh [旧记忆库 库目录] [--keep-legacy]
 set -eu
@@ -56,17 +56,18 @@ else
   "$X" import obsidian
 fi
 
-# 4. 接入
-step "接入 Claude Code"
-"$X" install claude-code --apply
-if command -v codex >/dev/null 2>&1; then
-  codex mcp remove x-mem >/dev/null 2>&1 || true
-  if codex mcp add x-mem -- "$X" mcp >/dev/null 2>&1; then
-    echo "Codex：已注册 x-mem MCP"
-  else
-    echo "Codex：注册没成功，手动运行：codex mcp add x-mem -- $X mcp"
-  fi
+# 3b. 库里没导入的部分（时间日志、会话摘录、资料）登记成知识库：照样能查、带出处，但不算你定过的事
+step "把 旧记忆库 库登记成知识库"
+KB_DIR=${VAULT:-$(head -n 1 "${XDG_CONFIG_HOME:-$HOME/.config}/old-mem/vault" 2>/dev/null || true)}
+if [ -n "$KB_DIR" ] && [ -d "$KB_DIR" ]; then
+  "$X" kb add "$KB_DIR" --exclude "01 项目" --exclude "02 经验与方法" --exclude "90 系统文件"
+else
+  echo "没找到库目录，跳过；以后可以运行：$X kb add <库目录>"
 fi
+
+# 4. 接入（Claude Code、Codex、Antigravity 里装了哪个接哪个，三端共用同一份记忆）
+step "接入 Claude Code / Codex / Antigravity"
+"$X" install all --apply
 
 # 5. 停用 旧记忆库
 if [ "$KEEP" -eq 1 ]; then
@@ -91,6 +92,8 @@ else
   else
     echo "没找到 旧记忆库 的 uninstall.sh，旧记忆库 没有停用。找到它的安装目录后运行：sh <目录>/scripts/uninstall.sh"
   fi
+  # 旧记忆库 的卸载脚本不管 Antigravity：它的 MCP 和钩子条目由 x-mem 删掉（先备份）
+  "$X" install antigravity --apply --drop >/dev/null && echo "Antigravity 里 旧记忆库 的条目已清理"
 fi
 
 step "检查"

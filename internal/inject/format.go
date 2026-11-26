@@ -24,14 +24,15 @@ var tierLine = map[recall.Tier]string{
 // Answer formats a recall result for the recall tool and the command line.
 func Answer(res recall.Result, maxHits int) string {
 	var b strings.Builder
-	b.WriteString(tierLine[res.Tier])
-	b.WriteString("\n")
-	if res.Tier == recall.None {
-		return b.String()
+	line := tierLine[res.Tier]
+	if res.Tier == recall.None && len(res.KB) > 0 {
+		line = "memory: none（你的记忆里没有这件事；只有知识库里的参考资料对得上，列在下面，引用时说明是资料，不要说成用户定过的事）"
 	}
+	b.WriteString(line)
+	b.WriteString("\n")
 	shown := 0
 	for _, h := range res.Hits {
-		if h.Tier == recall.None || shown >= maxHits {
+		if res.Tier == recall.None || h.Tier == recall.None || shown >= maxHits {
 			break
 		}
 		if res.Tier == recall.Direct && h.Tier != recall.Direct {
@@ -46,7 +47,48 @@ func Answer(res recall.Result, maxHits int) string {
 			fmt.Fprintf(&b, "   注意：这条和 %s 互相冲突，还没定下以哪条为准\n", strings.Join(h.Doc.ConflictsWith, "、"))
 		}
 	}
+	if len(res.Related) > 0 && shown > 0 {
+		b.WriteString("\n相关的笔记（和上面有关联，可能也用得上；用之前先看是否相关）：\n")
+		for _, d := range res.Related {
+			fmt.Fprintf(&b, "- %s：%s\n", describe(d), recall.Summary(d, 60))
+		}
+	}
+	if len(res.KB) > 0 {
+		b.WriteString("\n知识库里的参考资料（文章、日志、剪藏等，不是用户定过的事）：\n")
+		for _, h := range res.KB {
+			kind := ""
+			if h.Doc.Type == "session-excerpt" {
+				kind = "〔会话摘录：当时的讨论，结论是模型提炼的，未经确认〕"
+			}
+			fmt.Fprintf(&b, "- %s%s 出处=%s\n", h.Doc.Title, kind, Source(h.Doc))
+			if l := matchLine(h); l != "" {
+				fmt.Fprintf(&b, "  > %s\n", l)
+			}
+		}
+	}
 	return b.String()
+}
+
+// matchLine is the line of a reference page that best covers the question.
+func matchLine(h recall.Hit) string {
+	best, bestN := "", 0
+	for _, l := range h.Doc.InForceLines() {
+		n := 0
+		ln := textutil.Normalize(l)
+		for _, u := range h.Covered {
+			if strings.Contains(ln, u) {
+				n++
+			}
+		}
+		if n > bestN {
+			best, bestN = l, n
+		}
+	}
+	rs := []rune(strings.TrimLeft(best, "-*># "))
+	if len(rs) > 120 {
+		return string(rs[:120]) + "……"
+	}
+	return string(rs)
 }
 
 func describe(d *index.Doc) string {
@@ -54,16 +96,22 @@ func describe(d *index.Doc) string {
 }
 
 func layerName(l string) string {
-	if l == "project" {
+	switch l {
+	case "project":
 		return "项目层"
+	case "kb":
+		return "知识库"
 	}
 	return "个人层"
 }
 
 // Source is the path to show as a citation.
 func Source(d *index.Doc) string {
-	if d.Layer == "project" {
+	switch d.Layer {
+	case "project":
 		return ".x-mem/" + d.Rel
+	case "kb":
+		return d.Path
 	}
 	return "~/.x-mem/personal/" + d.Rel
 }
@@ -100,12 +148,15 @@ func PromptBlock(hits []recall.Hit) string {
 	return b.String()
 }
 
-// StartBlock lists the rules, preferences and recent decisions at session
-// start, within a token budget.
-func StartBlock(rules, recent []*index.Doc, budget int) string {
+// StartBlock is what a session starts with: the rules and preferences,
+// this project's recent decisions, and a catalog of every other topic in
+// memory (title and aliases), within a token budget. The catalog is what
+// lets the agent think of a note the user never names: it sees the topic
+// and fetches the note itself (旧记忆库's "subconscious" index).
+func StartBlock(rules, recent, others []*index.Doc, budget int) string {
 	var b strings.Builder
 	b.WriteString("<x-mem>\n" + Header + "\n")
-	b.WriteString("需要细节时用 x-mem 的 recall 或 read 工具取全文；记忆里没有的事，直说没有。\n")
+	b.WriteString("这是用户的记忆库（x-mem，Claude Code、Codex、Antigravity 共用）。用户提到下面目录里的事、或以前定过的事时，用 x-mem 的 recall 查或 read 取全文；记忆里没有的事，直说没有。\n")
 	used := textutil.EstimateTokens(b.String())
 	write := func(heading string, docs []*index.Doc, line func(*index.Doc) string) {
 		if len(docs) == 0 {
@@ -128,7 +179,7 @@ func StartBlock(rules, recent []*index.Doc, budget int) string {
 	}
 	write("规则与偏好：", rules, func(d *index.Doc) string {
 		s := d.Title
-		if sum := recall.Summary(d, 60); sum != "" && sum != d.Title {
+		if sum := recall.Summary(d, 60); sum != "" && strings.TrimRight(sum, "。.！!") != d.Title {
 			s += "：" + sum
 		}
 		if len(d.Triggers) > 0 {
@@ -143,6 +194,46 @@ func StartBlock(rules, recent []*index.Doc, budget int) string {
 	write("本项目最近 30 天定下或改过的事：", recent, func(d *index.Doc) string {
 		return d.Updated + " " + d.Title + "：" + recall.Summary(d, 60)
 	})
+	if len(others) > 0 && used < budget-40 {
+		h := "\n记忆目录（只有标题；相关时再用 recall / read 取）：\n"
+		b.WriteString(h)
+		used += textutil.EstimateTokens(h)
+		var line strings.Builder
+		flush := func() {
+			if line.Len() > 0 {
+				b.WriteString(line.String() + "\n")
+				line.Reset()
+			}
+		}
+		for i, d := range others {
+			item := d.Title
+			if len(d.Aliases) > 0 {
+				as := d.Aliases
+				if len(as) > 3 {
+					as = as[:3]
+				}
+				item += "〔" + strings.Join(as, "/") + "〕"
+			}
+			if d.Layer == "project" {
+				item = "（项目）" + item
+			}
+			cost := textutil.EstimateTokens(item) + 1
+			if used+cost > budget {
+				flush()
+				fmt.Fprintf(&b, "……还有 %d 条，用 recall 查\n", len(others)-i)
+				break
+			}
+			if line.Len() > 0 {
+				line.WriteString("；")
+			}
+			line.WriteString(item)
+			used += cost
+			if line.Len() > 300 {
+				flush()
+			}
+		}
+		flush()
+	}
 	b.WriteString("</x-mem>")
 	return b.String()
 }

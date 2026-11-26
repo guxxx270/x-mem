@@ -44,7 +44,21 @@ func Subjects(tool string, input json.RawMessage) []string {
 		}
 		return out
 	case "Edit", "Write", "MultiEdit", "Read":
-		return []string{str("file_path")}
+		out := []string{}
+		if f := str("file_path"); f != "" {
+			out = append(out, f)
+		}
+		if list, ok := in["file_paths"].([]any); ok {
+			for _, x := range list {
+				if s, ok := x.(string); ok {
+					out = append(out, s)
+				}
+			}
+		}
+		if len(out) == 0 {
+			out = append(out, "")
+		}
+		return out
 	case "NotebookEdit":
 		return []string{str("notebook_path")}
 	case "WebFetch":

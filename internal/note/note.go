@@ -21,19 +21,20 @@ var KnownOps = []string{"@supersedes", "@refines", "@conflicts_with", "@deprecat
 
 // Note is one Markdown file in a layer.
 type Note struct {
-	ID          string
-	Title       string
-	Type        string
-	Status      string
-	Aliases     []string
-	ValidFrom   string
-	ValidUntil  string
-	Relations   []Relation
-	Triggers    []string
-	Enforcement string
-	Sensitivity string
-	SourceQuote string
-	Body        string
+	ID            string
+	Title         string
+	Type          string
+	Status        string
+	Aliases       []string
+	ValidFrom     string
+	ValidUntil    string
+	Relations     []Relation
+	Triggers      []string
+	Enforcement   string
+	Sensitivity   string
+	SourceQuote   string
+	SourceSession string
+	Body          string
 
 	Layer string // "personal" or "project"
 	Rel   string // path relative to the layer root, with forward slashes
@@ -65,6 +66,7 @@ func Parse(src, rel string) *Note {
 		n.Sensitivity = strings.ToLower(strings.TrimSpace(str(m["sensitivity"])))
 		if src, ok := m["source"].(map[string]any); ok {
 			n.SourceQuote = strings.TrimSpace(str(src["quote"]))
+			n.SourceSession = strings.TrimSpace(str(src["session"]))
 		}
 		if rels, ok := m["relations"].([]any); ok {
 			for _, r := range rels {
@@ -155,3 +157,19 @@ var injectionRe = regexp.MustCompile(`(?i)(ignore (all |any )?(previous|prior|ab
 // Suspicious reports whether text reads like it tries to give orders to the
 // agent instead of recording a fact.
 func Suspicious(text string) bool { return injectionRe.MatchString(text) }
+
+var wikiRe = regexp.MustCompile(`\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]`)
+
+// Links are the [[wiki links]] in the body, as written.
+func (n *Note) Links() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range wikiRe.FindAllStringSubmatch(n.Body, -1) {
+		t := strings.TrimSpace(m[1])
+		if t != "" && !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
+}

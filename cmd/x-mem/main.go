@@ -49,8 +49,9 @@ const usage = `x-mem：给编程 agent 用的本地记忆
   x-mem reindex                   删掉索引重建（平时不需要）
   x-mem eval <题集.json>          跑回归题集
   x-mem import obsidian [库目录]   从 旧记忆库 库导入（--dry-run 先预演）
-  x-mem install claude-code       接入 Claude Code（--apply 直接改配置，先备份）
-  x-mem hook start|prompt|guard|stop   Claude Code 钩子（从标准输入读事件）
+  x-mem kb add <目录> [--exclude 子目录]   把资料文件夹（如 Obsidian 库）登记成知识库：能查、带出处，不算记忆
+  x-mem install claude-code|codex|antigravity|all   接入这些应用（--apply 直接改配置，先备份；--remove 拿掉）
+  x-mem hook start|prompt|guard|stop [--client codex|antigravity]   钩子（从标准输入读事件）
   x-mem mcp                       以 MCP 服务运行（stdio）
   x-mem version
 
@@ -82,11 +83,24 @@ func main() {
 	case "eval":
 		os.Exit(cmdEval(args))
 	case "hook":
-		if len(args) != 1 {
-			err = fmt.Errorf("用法：x-mem hook start|prompt|guard|stop")
+		client := hook.Claude
+		var rest []string
+		for i := 0; i < len(args); i++ {
+			switch {
+			case args[i] == "--client" && i+1 < len(args):
+				client = args[i+1]
+				i++
+			case strings.HasPrefix(args[i], "--client="):
+				client = strings.TrimPrefix(args[i], "--client=")
+			default:
+				rest = append(rest, args[i])
+			}
+		}
+		if len(rest) != 1 {
+			err = fmt.Errorf("用法：x-mem hook start|prompt|guard|stop [--client claude|codex|antigravity]")
 			break
 		}
-		if out := hook.Run(args[0], os.Stdin, time.Now()); out != "" {
+		if out := hook.RunAs(client, rest[0], os.Stdin, time.Now()); out != "" {
 			fmt.Println(out)
 		}
 	case "mcp":
@@ -107,6 +121,8 @@ func main() {
 		err = cmdWriter(args)
 	case "capture":
 		err = cmdCapture(args)
+	case "kb":
+		err = cmdKB(args)
 	case "version", "--version", "-v":
 		fmt.Println("x-mem", mcp.Version)
 	case "help", "--help", "-h":
@@ -354,6 +370,9 @@ func cmdDoctor() int {
 	ok("索引：%d 条笔记，%d 条生效（%s）", len(ix.Docs), ix.N, time.Since(start).Round(time.Millisecond))
 	ids := map[string][]string{}
 	for _, d := range ix.Docs {
+		if d.Layer == "kb" {
+			continue // reference material: its frontmatter is not ours to police
+		}
 		ids[d.ID] = append(ids[d.ID], d.Rel)
 		for _, p := range append(append([]string{}, d.NoteProblems...), d.Problems...) {
 			fail("%s：%s", inject.Source(d), p)
@@ -375,20 +394,49 @@ func cmdDoctor() int {
 		}
 	}
 	home, _ := os.UserHomeDir()
-	settings, _ := os.ReadFile(settingsPath())
-	var missing []string
-	for _, ev := range []string{"start", "prompt", "guard", "stop"} {
-		if !strings.Contains(string(settings), "x-mem hook "+ev) {
-			missing = append(missing, ev)
-		}
+	read := func(p string) string { b, _ := os.ReadFile(p); return string(b) }
+	type client struct {
+		name, hooks, mcp, mcpWant, fix string
+		events                         []string
 	}
-	switch {
-	case len(missing) == 0:
-		ok("Claude Code 钩子已配置（start / prompt / guard / stop）")
-	case len(missing) == 4:
-		note("Claude Code 钩子还没配置 → x-mem install claude-code --apply")
-	default:
-		fail("Claude Code 钩子缺 %s → x-mem install claude-code --apply", strings.Join(missing, "、"))
+	clients := []client{
+		{"Claude Code", read(settingsPath()), read(filepath.Join(home, ".claude.json")), "x-mem", "x-mem install claude-code --apply", []string{"start", "prompt", "guard", "stop"}},
+		{"Codex", read(filepath.Join(codexDir(), "hooks.json")), read(filepath.Join(codexDir(), "config.toml")), "x-mem", "x-mem install codex --apply（然后在 Codex 里 /hooks 信任）", []string{"start", "prompt", "guard", "stop"}},
+		{"Antigravity", read(filepath.Join(geminiConfigDir(), "hooks.json")), read(filepath.Join(geminiConfigDir(), "mcp_config.json")), "x-mem", "x-mem install antigravity --apply", []string{"start", "prompt", "guard", "stop"}},
+	}
+	installed := map[string]bool{}
+	for _, c := range detectClients() {
+		installed[map[string]string{"claude-code": "Claude Code", "codex": "Codex", "antigravity": "Antigravity"}[c]] = true
+	}
+	for _, c := range clients {
+		if !installed[c.name] {
+			continue
+		}
+		var missing []string
+		for _, ev := range c.events {
+			if !strings.Contains(c.hooks, "x-mem hook "+ev) {
+				missing = append(missing, ev)
+			}
+		}
+		hasMCP := strings.Contains(c.mcp, c.mcpWant)
+		switch {
+		case len(missing) == 0 && hasMCP:
+			ok("%s：钩子和 MCP 都接好了", c.name)
+		case len(missing) == len(c.events) && !hasMCP:
+			note("%s 还没接入 → %s", c.name, c.fix)
+		default:
+			what := []string{}
+			if len(missing) > 0 {
+				what = append(what, "钩子缺 "+strings.Join(missing, "、"))
+			}
+			if !hasMCP {
+				what = append(what, "MCP 没注册")
+			}
+			fail("%s：%s → %s", c.name, strings.Join(what, "，"), c.fix)
+		}
+		if strings.Contains(strings.ToLower(c.hooks+c.mcp), "old-mem") {
+			note("%s 的配置里还有 旧记忆库 的条目；不用 旧记忆库 了就运行它的 uninstall.sh，或手动删掉", c.name)
+		}
 	}
 	in := writer.NewInbox(l.State)
 	if q := in.List(writer.Queued); len(q) > 0 {
@@ -408,11 +456,6 @@ func cmdDoctor() int {
 		if runtime.GOOS == "darwin" && !capture.TimerInstalled() {
 			fail("会话采集开着，但定时扫描没装 → x-mem capture on")
 		}
-	}
-	if data, err := os.ReadFile(filepath.Join(home, ".claude.json")); err == nil && strings.Contains(string(data), "x-mem") {
-		ok("Claude Code 里注册了 x-mem MCP")
-	} else {
-		note("还没在 Claude Code 里注册 MCP → x-mem install claude-code")
 	}
 	if bad == 0 {
 		fmt.Println("\n没有发现问题。")

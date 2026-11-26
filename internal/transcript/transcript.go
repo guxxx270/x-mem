@@ -1,7 +1,14 @@
-// Package transcript reads Claude Code's session files
-// (~/.claude/projects/<project>/<session>.jsonl): one JSON object per line.
+// Package transcript reads the session files of the three agents x-mem
+// serves, one JSON object per line each:
+//
+//   - Claude Code: ~/.claude/projects/<project>/<session>.jsonl
+//   - Codex:       ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+//   - Antigravity: ~/.gemini/antigravity*/brain/<id>/.system_generated/logs/transcript.jsonl
+//
 // x-mem only ever needs two things from them: what the user typed, and the
-// assistant's text just before it for context.
+// assistant's text just before it for context. Context the agents inject
+// (environment blocks, AGENTS.md, system reminders) and headless runs
+// (`claude -p`, `codex exec`, x-mem's own host runs) are not the user's words.
 package transcript
 
 import (
@@ -20,13 +27,27 @@ import (
 	"x-mem/internal/textutil"
 )
 
-// Message is one turn's text.
+// Clients x-mem reads.
+const (
+	Claude      = "claude"
+	Codex       = "codex"
+	Antigravity = "antigravity"
+)
+
+// Message is one turn's text, or ("meta") something about the session.
 type Message struct {
-	Role    string // "user" or "assistant"
-	Text    string
-	Session string
-	Time    string
-	Cwd     string
+	Role     string // "user", "assistant" or "meta"
+	Text     string
+	Client   string
+	Session  string // the agent's own session id
+	Time     string
+	Cwd      string
+	Headless bool // meta: the session is automation, not a person
+}
+
+func home() string {
+	h, _ := os.UserHomeDir()
+	return h
 }
 
 // Dir is where Claude Code keeps session files.
@@ -36,34 +57,58 @@ func Dir() string {
 	}
 	base := os.Getenv("CLAUDE_CONFIG_DIR")
 	if base == "" {
-		home, _ := os.UserHomeDir()
-		base = filepath.Join(home, ".claude")
+		base = filepath.Join(home(), ".claude")
 	}
 	return filepath.Join(base, "projects")
 }
 
-type line struct {
-	Type      string          `json:"type"`
-	IsMeta    bool            `json:"isMeta"`
-	SessionID string          `json:"sessionId"`
-	Cwd       string          `json:"cwd"`
-	Timestamp string          `json:"timestamp"`
-	Message   json.RawMessage `json:"message"`
+// CodexDir is where Codex keeps session files.
+func CodexDir() string {
+	if d := os.Getenv("X_MEM_CODEX_SESSIONS"); d != "" {
+		return d
+	}
+	base := os.Getenv("CODEX_HOME")
+	if base == "" {
+		base = filepath.Join(home(), ".codex")
+	}
+	return filepath.Join(base, "sessions")
 }
 
-type msg struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+// AntigravityDirs are Antigravity's app data folders (app, CLI, IDE).
+func AntigravityDirs() []string {
+	if d := os.Getenv("X_MEM_ANTIGRAVITY_DIRS"); d != "" {
+		return filepath.SplitList(d)
+	}
+	g := filepath.Join(home(), ".gemini")
+	return []string{filepath.Join(g, "antigravity"), filepath.Join(g, "antigravity-cli"), filepath.Join(g, "antigravity-ide")}
 }
 
-type block struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+// ClientOf guesses which agent wrote a session file from its path.
+func ClientOf(path string) string {
+	p := filepath.ToSlash(path)
+	switch {
+	case strings.Contains(p, "/.system_generated/") || strings.Contains(p, "/brain/"):
+		return Antigravity
+	case strings.HasPrefix(filepath.Base(p), "rollout-") || strings.Contains(p, "/.codex/"):
+		return Codex
+	}
+	return Claude
+}
+
+// SessionOf is the session id a file belongs to, from its path.
+func SessionOf(path string) string {
+	if ClientOf(path) == Antigravity {
+		// brain/<conversationId>/.system_generated/logs/transcript.jsonl
+		return filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(path))))
+	}
+	return strings.TrimSuffix(filepath.Base(path), ".jsonl")
 }
 
 var (
-	reminderRe = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
-	commandRe  = regexp.MustCompile(`^\s*<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr)>`)
+	reminderRe = regexp.MustCompile(`(?s)<(system-reminder|ide_selection|ide_opened_file)>.*?</(system-reminder|ide_selection|ide_opened_file)>`)
+	noiseRe    = regexp.MustCompile(`(?i)^\s*(<(environment_context|user_instructions|system-reminder|command-|local-command|task-notification|turn_aborted|permissions|bash-input|bash-stdout|bash-stderr)|# AGENTS\.md|Caveat: The messages below|This session is being continued)`)
+	requestRe  = regexp.MustCompile(`(?s)<USER_REQUEST>(.*?)</USER_REQUEST>`)
+	agMetaRe   = regexp.MustCompile(`(?s)<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>.*?</(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>`)
 )
 
 // ReadFrom reads the complete lines after offset and returns the messages in
@@ -91,6 +136,9 @@ func ReadFrom(path string, offset int64) ([]Message, int64, error) {
 		}
 		pos += int64(len(raw))
 		if m, ok := parse(raw); ok {
+			if m.Session == "" && m.Role != "meta" {
+				m.Session = SessionOf(path)
+			}
 			out = append(out, m)
 		}
 		if err != nil {
@@ -100,58 +148,198 @@ func ReadFrom(path string, offset int64) ([]Message, int64, error) {
 	return out, pos, nil
 }
 
+// line covers the fields of all three formats.
+type line struct {
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"`
+	CreatedAt string `json:"created_at"`
+	// Claude Code
+	IsMeta      bool            `json:"isMeta"`
+	IsSidechain bool            `json:"isSidechain"`
+	IsCompact   bool            `json:"isCompactSummary"`
+	SessionID   string          `json:"sessionId"`
+	Cwd         string          `json:"cwd"`
+	Entrypoint  string          `json:"entrypoint"`
+	Origin      json.RawMessage `json:"origin"`
+	Message     json.RawMessage `json:"message"`
+	// Codex
+	Payload json.RawMessage `json:"payload"`
+	// Antigravity
+	Source  string `json:"source"`
+	Content string `json:"content"`
+}
+
+type block struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+func texts(content json.RawMessage, kinds ...string) []string {
+	var s string
+	if json.Unmarshal(content, &s) == nil {
+		return []string{s}
+	}
+	var blocks []block
+	if json.Unmarshal(content, &blocks) != nil {
+		return nil
+	}
+	var out []string
+	for _, b := range blocks {
+		for _, k := range kinds {
+			if b.Type == k && b.Text != "" {
+				out = append(out, b.Text)
+			}
+		}
+	}
+	return out
+}
+
+// userWords keeps what the person typed from the parts of a user message.
+func userWords(parts []string) string {
+	var keep []string
+	for _, p := range parts {
+		if noiseRe.MatchString(p) {
+			continue
+		}
+		p = strings.TrimSpace(reminderRe.ReplaceAllString(p, ""))
+		if p != "" {
+			keep = append(keep, p)
+		}
+	}
+	return strings.Join(keep, "\n")
+}
+
 func parse(raw []byte) (Message, bool) {
 	var l line
-	if json.Unmarshal(raw, &l) != nil || l.IsMeta || (l.Type != "user" && l.Type != "assistant") {
+	if json.Unmarshal(raw, &l) != nil {
 		return Message{}, false
 	}
-	var m msg
+	switch {
+	case len(l.Payload) > 0: // Codex
+		return parseCodex(l)
+	case l.Type == "USER_INPUT" || l.Type == "PLANNER_RESPONSE": // Antigravity
+		return parseAntigravity(l)
+	}
+	return parseClaude(l)
+}
+
+func parseClaude(l line) (Message, bool) {
+	if strings.HasPrefix(l.Entrypoint, "sdk-") {
+		return Message{Role: "meta", Client: Claude, Headless: true, Cwd: l.Cwd}, true
+	}
+	if l.IsMeta || l.IsSidechain || l.IsCompact || (l.Type != "user" && l.Type != "assistant") {
+		return Message{}, false
+	}
+	if len(l.Origin) > 0 {
+		var o struct {
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal(l.Origin, &o) == nil && o.Kind != "" && o.Kind != "human" {
+			return Message{}, false
+		}
+	}
+	var m struct {
+		Content json.RawMessage `json:"content"`
+	}
 	if json.Unmarshal(l.Message, &m) != nil {
 		return Message{}, false
 	}
 	var text string
-	var s string
-	if json.Unmarshal(m.Content, &s) == nil {
-		text = s
-	} else {
-		var blocks []block
-		if json.Unmarshal(m.Content, &blocks) != nil {
-			return Message{}, false
-		}
-		var parts []string
-		for _, b := range blocks {
-			if b.Type == "text" && b.Text != "" {
-				parts = append(parts, b.Text)
-			}
-		}
-		text = strings.Join(parts, "\n")
-	}
 	if l.Type == "user" {
-		if commandRe.MatchString(text) || strings.HasPrefix(text, "Caveat: ") {
+		text = userWords(texts(m.Content, "text"))
+	} else {
+		text = strings.TrimSpace(strings.Join(texts(m.Content, "text"), "\n"))
+	}
+	if text == "" {
+		return Message{}, false
+	}
+	return Message{Role: l.Type, Text: text, Client: Claude, Session: l.SessionID, Time: l.Timestamp, Cwd: l.Cwd}, true
+}
+
+func parseCodex(l line) (Message, bool) {
+	var p struct {
+		Type       string          `json:"type"`
+		Role       string          `json:"role"`
+		ID         string          `json:"id"`
+		Cwd        string          `json:"cwd"`
+		Originator string          `json:"originator"`
+		Content    json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(l.Payload, &p) != nil {
+		return Message{}, false
+	}
+	switch {
+	case l.Type == "session_meta":
+		return Message{Role: "meta", Client: Codex, Session: p.ID, Cwd: p.Cwd,
+			Headless: strings.Contains(p.Originator, "exec")}, true
+	case l.Type == "turn_context" && p.Cwd != "":
+		return Message{Role: "meta", Client: Codex, Cwd: p.Cwd}, true
+	case l.Type != "response_item" || p.Type != "message":
+		return Message{}, false
+	}
+	var text string
+	switch p.Role {
+	case "user":
+		text = userWords(texts(p.Content, "input_text"))
+	case "assistant":
+		text = strings.TrimSpace(strings.Join(texts(p.Content, "output_text"), "\n"))
+	default:
+		return Message{}, false
+	}
+	if text == "" {
+		return Message{}, false
+	}
+	return Message{Role: p.Role, Text: text, Client: Codex, Time: l.Timestamp}, true
+}
+
+func parseAntigravity(l line) (Message, bool) {
+	text := l.Content
+	role := "assistant"
+	if l.Type == "USER_INPUT" {
+		if l.Source != "" && l.Source != "USER_EXPLICIT" {
 			return Message{}, false
 		}
-		text = reminderRe.ReplaceAllString(text, "")
+		role = "user"
+		if m := requestRe.FindStringSubmatch(text); m != nil {
+			text = m[1]
+		} else {
+			text = agMetaRe.ReplaceAllString(text, "")
+		}
 	}
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return Message{}, false
 	}
-	return Message{Role: l.Type, Text: text, Session: l.SessionID, Time: l.Timestamp, Cwd: l.Cwd}, true
+	return Message{Role: role, Text: text, Client: Antigravity, Time: l.CreatedAt}, true
 }
 
-// Recent lists session files changed within the window, newest first.
+// Recent lists the session files of all three agents changed within the
+// window, newest first.
 func Recent(within time.Duration, max int) []string {
 	type f struct {
 		path string
 		mod  time.Time
 	}
 	var files []f
-	cut := time.Now().Add(-within)
-	matches, _ := filepath.Glob(filepath.Join(Dir(), "*", "*.jsonl"))
-	for _, p := range matches {
-		if st, err := os.Stat(p); err == nil && st.ModTime().After(cut) {
-			files = append(files, f{p, st.ModTime()})
+	now := time.Now()
+	cut := now.Add(-within)
+	add := func(paths []string) {
+		for _, p := range paths {
+			if st, err := os.Stat(p); err == nil && st.ModTime().After(cut) {
+				files = append(files, f{p, st.ModTime()})
+			}
 		}
+	}
+	m, _ := filepath.Glob(filepath.Join(Dir(), "*", "*.jsonl"))
+	add(m)
+	// Codex files sit in one folder per day: only look at the days in the window.
+	for d := cut.AddDate(0, 0, -1); !d.After(now.AddDate(0, 0, 1)); d = d.AddDate(0, 0, 1) {
+		m, _ := filepath.Glob(filepath.Join(CodexDir(), d.Format("2006/01/02"), "*.jsonl"))
+		add(m)
+	}
+	for _, dir := range AntigravityDirs() {
+		m, _ := filepath.Glob(filepath.Join(dir, "brain", "*", ".system_generated", "logs", "transcript.jsonl"))
+		add(m)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
 	var out []string
@@ -203,21 +391,23 @@ func longestRun(s string) string {
 
 // Found is where a quote was found.
 type Found struct {
-	Session string // "claude:<session id>"
+	Session string // "<client>:<session id>"
 	Path    string
 	Time    string
+	Cwd     string
 }
 
 // FindQuote looks for a user message containing quote in the session files
-// changed within the window. Only what the user typed counts: a quote that
-// appears in a tool result or a web page the agent read is not the user's.
+// of all three agents changed within the window. Only what a person typed
+// counts: a quote that appears in a tool result, a web page the agent read,
+// or a headless run is not the user's.
 func FindQuote(quote string, within time.Duration) (Found, bool) {
 	q := Norm(quote)
 	if len([]rune(q)) < 4 {
 		return Found{}, false
 	}
 	key := longestRun(quote)
-	for _, p := range Recent(within, 200) {
+	for _, p := range Recent(within, 300) {
 		// Session files can be large: skip the ones that cannot contain the
 		// quote before parsing any JSON.
 		if key != "" {
@@ -230,14 +420,35 @@ func FindQuote(quote string, within time.Duration) (Found, bool) {
 		if err != nil {
 			continue
 		}
+		headless, cwd, sid := false, "", ""
+		for _, m := range msgs {
+			if m.Role == "meta" {
+				headless = headless || m.Headless
+				if m.Cwd != "" {
+					cwd = m.Cwd
+				}
+				if m.Session != "" {
+					sid = m.Session
+				}
+			}
+		}
+		if headless {
+			continue
+		}
 		for i := len(msgs) - 1; i >= 0; i-- {
 			m := msgs[i]
 			if m.Role == "user" && strings.Contains(Norm(m.Text), q) {
-				sid := m.Session
-				if sid == "" {
-					sid = strings.TrimSuffix(filepath.Base(p), ".jsonl")
+				id := m.Session
+				if sid != "" && ClientOf(p) == Codex {
+					id = sid
 				}
-				return Found{Session: "claude:" + sid, Path: p, Time: m.Time}, true
+				if id == "" {
+					id = SessionOf(p)
+				}
+				if m.Cwd != "" {
+					cwd = m.Cwd
+				}
+				return Found{Session: ClientOf(p) + ":" + id, Path: p, Time: m.Time, Cwd: cwd}, true
 			}
 		}
 	}

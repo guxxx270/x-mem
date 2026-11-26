@@ -5,9 +5,12 @@ package config
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Layers says where the notes and the cache live for one invocation.
@@ -16,6 +19,78 @@ type Layers struct {
 	Personal string // Home/personal
 	State    string // Home/state (never in git)
 	Project  string // <repo>/.x-mem, or "" outside a project
+	KB       []KB   // knowledge-base folders: reference material, searchable, never written
+}
+
+// KB is a folder of reference material (an Obsidian vault, a docs repo):
+// searchable with sources, but never counted as something you decided.
+type KB struct {
+	Path    string   `json:"path"`
+	Exclude []string `json:"exclude,omitempty"` // sub-folders or files to leave out, relative to Path
+}
+
+// LoadKB reads the knowledge-base folders from config.json in the x-mem home.
+func LoadKB(home string) []KB {
+	var cfg struct {
+		KB []json.RawMessage `json:"kb"`
+	}
+	data, err := os.ReadFile(filepath.Join(home, "config.json"))
+	if err != nil || json.Unmarshal(data, &cfg) != nil {
+		return nil
+	}
+	var out []KB
+	for _, raw := range cfg.KB {
+		var k KB
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			k.Path = s
+		} else if json.Unmarshal(raw, &k) != nil {
+			continue
+		}
+		if k.Path = expand(k.Path); k.Path != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// SaveKB writes the knowledge-base list into config.json, keeping the
+// file's other settings.
+func SaveKB(home string, kbs []KB) error {
+	path := filepath.Join(home, "config.json")
+	cfg := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return fmt.Errorf("%s 不是合法的 JSON：%v", path, err)
+		}
+	}
+	if len(kbs) == 0 {
+		delete(cfg, "kb")
+	} else {
+		cfg["kb"] = kbs
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func expand(p string) string {
+	p = strings.TrimSpace(p)
+	if strings.HasPrefix(p, "~/") {
+		if h, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(h, p[2:])
+		}
+	}
+	if p == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
 }
 
 // DirName is the folder name of a project layer inside a repository.
@@ -36,6 +111,7 @@ func Resolve(cwd string) (Layers, error) {
 		Home:     home,
 		Personal: filepath.Join(home, "personal"),
 		State:    filepath.Join(home, "state"),
+		KB:       LoadKB(home),
 	}
 	if p := os.Getenv("X_MEM_PROJECT"); p != "" {
 		l.Project, _ = filepath.Abs(p)
@@ -90,7 +166,11 @@ func RepoRoot(dir string) (string, error) {
 // Key identifies this combination of layers, so each project gets its own
 // cache file.
 func (l Layers) Key() string {
-	h := sha1.Sum([]byte(l.Personal + "\x00" + l.Project))
+	key := l.Personal + "\x00" + l.Project
+	for _, k := range l.KB {
+		key += "\x00" + k.Path + "\x01" + strings.Join(k.Exclude, "\x02")
+	}
+	h := sha1.Sum([]byte(key))
 	return hex.EncodeToString(h[:6])
 }
 
@@ -105,13 +185,31 @@ func (l Layers) Roots() []Root {
 			out = append(out, Root{Name: "project", Dir: l.Project})
 		}
 	}
+	for _, k := range l.KB {
+		if st, err := os.Stat(k.Path); err == nil && st.IsDir() && k.Path != l.Personal && k.Path != l.Project {
+			out = append(out, Root{Name: "kb", Dir: k.Path, Exclude: k.Exclude})
+		}
+	}
 	return out
 }
 
 // Root is one layer folder.
 type Root struct {
-	Name string
-	Dir  string
+	Name    string // personal, project or kb
+	Dir     string
+	Exclude []string // kb only: relative paths left out
+}
+
+// Excluded reports whether a path relative to the root is left out.
+func (r Root) Excluded(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	for _, e := range r.Exclude {
+		e = strings.Trim(filepath.ToSlash(e), "/")
+		if e != "" && (rel == e || strings.HasPrefix(rel, e+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 // SkipDir reports whether a folder inside a layer holds no notes.
