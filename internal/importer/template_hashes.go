@@ -1,8 +1,8 @@
 package importer
 
-// templateHashes are the SHA-256 of every page 旧记忆库 ships in its vault
-// templates (template/ and template-zh/, 旧记忆库 3db52f6). A page that still
-// matches one is 旧记忆库's sample text, not something the user wrote.
+// templateHashes are the SHA-256 of unchanged starter template pages in a
+// structured vault. A page matching one is boilerplate sample text, not
+// something the user wrote.
 var templateHashes = map[string]bool{
 	"006430c87592c4e5a1892066aa2b8385f2bfbb060fb7b0a14ad9adf220b95fd6": true,
 	"060c1d3123e6300aaf0e349f537dd76ec6cc2628e17926c15f9a3b14ebe94033": true,

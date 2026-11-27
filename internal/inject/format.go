@@ -196,8 +196,8 @@ func PromptBlock(hits []recall.Hit) string {
 // this project's recent decisions, and a catalog of every other topic in
 // memory (title and aliases), within a token budget. The catalog is what
 // lets the agent think of a note the user never names: it sees the topic
-// and fetches the note itself (旧记忆库's "subconscious" index).
-func StartBlock(rules, recent, others []*index.Doc, budget int) string {
+// and fetches the note itself.
+func StartBlock(rules, skills, recent, others []*index.Doc, budget int) string {
 	var b strings.Builder
 	b.WriteString("<x-mem>\n" + Header + "\n")
 	b.WriteString("这是用户的记忆库（x-mem，Claude Code、Codex、Antigravity 共用）。用户提到下面目录里的事、或以前定过的事时，用 x-mem 的 recall 查或 read 取全文；记忆里没有的事，直说没有。\n")
@@ -235,6 +235,17 @@ func StartBlock(rules, recent, others []*index.Doc, budget int) string {
 		}
 		return s
 	})
+	listed := skills
+	if len(listed) > MaxSkillsListed {
+		listed = listed[:MaxSkillsListed]
+	}
+	write("你的技能（用户从自己的经验里确认过的做法；手上的事正好是这种情形时，用 read 按 id 取全文照做，并说明用了哪个技能；不是就不用提）：", listed, func(d *index.Doc) string {
+		return d.Title + "〔" + d.ID + "〕：" + cutRunes(d.When, 60)
+	})
+	if n := len(skills) - len(listed); n > 0 {
+		fmt.Fprintf(&b, "- ……还有 %d 个技能，用 recall 查\n", n)
+		used += 12
+	}
 	write("本项目最近 30 天定下或改过的事：", recent, func(d *index.Doc) string {
 		return d.Updated + " " + d.Title + "：" + recall.Summary(d, 60)
 	})
@@ -280,6 +291,18 @@ func StartBlock(rules, recent, others []*index.Doc, budget int) string {
 	}
 	b.WriteString("</x-mem>")
 	return b.String()
+}
+
+// MaxSkillsListed is how many skills a session starts with, the most used
+// first; the rest are found by recall like any note.
+const MaxSkillsListed = 8
+
+func cutRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "……"
 }
 
 // Suspicious reports whether a note's text looks like it tries to give the

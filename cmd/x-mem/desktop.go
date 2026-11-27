@@ -60,10 +60,10 @@ func stateDir() string {
 func desktopWatchFile() string { return filepath.Join(stateDir(), "desktop-pending.json") }
 
 type desktopPending struct {
-	PID         int    `json:"pid"`
-	Remove      bool   `json:"remove"`
-	DropLegacy bool   `json:"drop_legacy"`
-	Since       string `json:"since"`
+	PID    int    `json:"pid"`
+	Remove bool   `json:"remove"`
+	Drop   string `json:"drop,omitempty"`
+	Since  string `json:"since"`
 }
 
 // loadDesktopPending returns the change waiting for the app to quit, if its
@@ -91,13 +91,13 @@ func (in installer) claudeDesktop() error {
 		if in.remove {
 			args = append(args, "--remove")
 		}
-		if in.dropLegacy {
-			args = append(args, "--drop")
+		if in.drop != "" {
+			args = append(args, "--drop", in.drop)
 		}
 		pid := spawn(in.exe, args...)
 		if pid > 0 {
 			_ = os.MkdirAll(stateDir(), 0o755)
-			data, _ := json.Marshal(desktopPending{PID: pid, Remove: in.remove, DropLegacy: in.dropLegacy, Since: time.Now().Format(time.RFC3339)})
+			data, _ := json.Marshal(desktopPending{PID: pid, Remove: in.remove, Drop: in.drop, Since: time.Now().Format(time.RFC3339)})
 			_ = os.WriteFile(desktopWatchFile(), data, 0o644)
 		}
 		in.say("Claude 桌面版正开着：它退出时会把自己的设置整份写回，现在改会被覆盖。")
@@ -124,17 +124,20 @@ func (in installer) claudeDesktop() error {
 	if err := in.jsonKey(path, []string{"mcpServers", "x-mem"}, server); err != nil {
 		return err
 	}
-	if in.dropLegacy && !in.remove {
-		for _, name := range desktopMatchingServers(path) {
+	if in.drop != "" && !in.remove {
+		for _, name := range desktopMatchingServers(path, in.drop) {
 			_ = in.jsonKey(path, []string{"mcpServers", name}, nil)
 		}
-		in.say("如果 旧记忆库 是以扩展装进 Claude 桌面版的（设置 → 扩展 里能看到），在那里点卸载")
 	}
 	return nil
 }
 
-// desktopMatchingServers lists 旧记忆库's entries in the desktop app's config.
-func desktopMatchingServers(path string) []string {
+// desktopMatchingServers lists entries in the desktop app's config matching pattern.
+func desktopMatchingServers(path, pattern string) []string {
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	if pattern == "" {
+		return nil
+	}
 	var cfg struct {
 		Servers map[string]json.RawMessage `json:"mcpServers"`
 	}
@@ -142,7 +145,7 @@ func desktopMatchingServers(path string) []string {
 	_ = json.Unmarshal(raw, &cfg)
 	var out []string
 	for name, v := range cfg.Servers {
-		if strings.Contains(strings.ToLower(name+string(v)), "old-mem") {
+		if name != "x-mem" && strings.Contains(strings.ToLower(name+string(v)), pattern) {
 			out = append(out, name)
 		}
 	}
@@ -168,9 +171,6 @@ func doctorDesktop(ok, note, fail func(string, ...any)) {
 		note("Claude 桌面版：等它退出后自动接上（%s 起在等）；想马上生效就 ⌘Q 退出再打开", strings.Replace(pending.Since, "T", " ", 1)[:16])
 	default:
 		note("Claude 桌面版还没接入 → x-mem install claude-desktop --apply")
-	}
-	if names := desktopMatchingServers(claudeDesktopConfig()); len(names) > 0 && !(waiting && pending.DropLegacy) {
-		note("Claude 桌面版的配置里还有 旧记忆库（%s）→ x-mem install claude-desktop --apply --drop", strings.Join(names, "、"))
 	}
 }
 

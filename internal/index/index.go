@@ -34,7 +34,7 @@ import (
 	"x-mem/internal/textutil"
 )
 
-const formatVersion = 7
+const formatVersion = 8
 
 // ExtractInline makes Open read documents that have no cached text yet
 // (x-mem kb add, reindex). Otherwise they wait for a background run, so a
@@ -61,6 +61,8 @@ type Doc struct {
 	Enforcement, Sensitivity          string
 	Links                             []string // [[wiki links]] in the body
 	Session                           string   // source.session: the conversation it came from
+	When                              string   // skill: the situation it is for
+	Sources                           []string // skill: the notes it grew from
 	Relations                         []note.Relation
 	Size, MTime                       int64
 
@@ -163,8 +165,11 @@ func InvalidateKB(l config.Layers) {
 	_ = os.Remove(metaPath(KBLayers(l)))
 }
 
+// metaPath names the cache by format version too, so two x-mem versions
+// side by side (a plugin in one app, an older install in another) keep
+// their own caches instead of rebuilding each other's.
 func metaPath(l config.Layers) string {
-	return filepath.Join(l.State, "index-"+l.Key()+".meta")
+	return filepath.Join(l.State, fmt.Sprintf("index-%s-v%d.meta", l.Key(), formatVersion))
 }
 
 func openPart(l config.Layers, today string, kb bool) (*part, error) {
@@ -381,7 +386,7 @@ func build(l config.Layers, sigs []sig, today string, kb bool) (*part, error) {
 			ID: n.ID, Title: n.Title, Type: n.Type, Layer: s.layer, Rel: n.Rel, Path: s.path,
 			Aliases: n.Aliases, Triggers: n.Triggers, Relations: n.Relations,
 			Enforcement: n.Enforcement, Sensitivity: n.Sensitivity,
-			Links: n.Links(), Session: n.SourceSession,
+			Links: n.Links(), Session: n.SourceSession, When: n.When, Sources: n.Sources,
 			Size: s.size, MTime: s.mtime, NoteProblems: n.Problems,
 			Suspicious: note.Suspicious(n.Title + "\n" + n.Body),
 			TextFile:   textFile, Unread: unread, Waiting: waiting,
@@ -476,7 +481,7 @@ func (ix *part) save(dir, metaPath string, old *part) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	ix.PostFile = fmt.Sprintf("index-%s-%d.post", ix.Key, time.Now().UnixNano())
+	ix.PostFile = fmt.Sprintf("index-%s-v%d-%d.post", ix.Key, formatVersion, time.Now().UnixNano())
 	postPath := filepath.Join(dir, ix.PostFile)
 	if err := os.WriteFile(postPath, ix.pending, 0o644); err != nil {
 		return err
@@ -497,7 +502,7 @@ func (ix *part) save(dir, metaPath string, old *part) error {
 	}
 	// Postings left behind by a crash or a lost race. Give readers that may
 	// still hold one a minute before removing it.
-	stale, _ := filepath.Glob(filepath.Join(dir, "index-"+ix.Key+"-*.post"))
+	stale, _ := filepath.Glob(filepath.Join(dir, fmt.Sprintf("index-%s-v%d-*.post", ix.Key, formatVersion)))
 	for _, p := range stale {
 		if filepath.Base(p) == ix.PostFile {
 			continue

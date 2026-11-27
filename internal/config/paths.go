@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -74,6 +75,24 @@ func SaveKB(home string, kbs []KB) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+// EnsurePersonal creates the personal layer (notes, rules, a git
+// repository) when it is not there yet: the first note written through a
+// plugin, with no x-mem init run by hand, lands somewhere sensible.
+func EnsurePersonal(l Layers) (created bool, err error) {
+	if st, err := os.Stat(l.Personal); err == nil && st.IsDir() {
+		return false, nil
+	}
+	for _, sub := range []string{"notes", "rules", "inbox"} {
+		if err := os.MkdirAll(filepath.Join(l.Personal, sub), 0o755); err != nil {
+			return false, err
+		}
+	}
+	if _, err := exec.LookPath("git"); err == nil {
+		_ = exec.Command("git", "-C", l.Personal, "init", "-q").Run()
+	}
+	return true, nil
 }
 
 // SetConfig sets (nil removes) one key of config.json in the x-mem home,

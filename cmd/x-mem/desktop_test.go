@@ -16,7 +16,7 @@ func TestClaudeDesktopInstall(t *testing.T) {
 	t.Setenv("X_MEM_CLAUDE_DESKTOP_CONFIG", cfg)
 	t.Setenv("X_MEM_HOME", filepath.Join(dir, "xm"))
 
-	in := installer{exe: "/opt/x-mem", apply: true, dropLegacy: true}
+	in := installer{exe: "/opt/x-mem", apply: true, drop: "old-mem"}
 	if err := in.claudeDesktop(); err != nil {
 		t.Fatal(err)
 	}

@@ -14,8 +14,8 @@ import (
 )
 
 // Op is one change a write made, recorded so it can be reversed on its own.
-// Undo does not use git revert: 旧记忆库 appended a day's notes to one page,
-// so reverting a write in the middle always conflicted.
+// Undo reverses recorded file operations rather than running git revert, so
+// reverting an earlier write never conflicts with later ones.
 type Op struct {
 	Kind    string `json:"kind"` // create, status, ignore
 	Path    string `json:"path"`
@@ -319,7 +319,7 @@ func gitTracksOrExists(root, path string) bool {
 	if fileExists(path) {
 		return true
 	}
-	rel, err := filepath.Rel(root, path)
+	rel, err := repoRel(root, path)
 	if err != nil {
 		return false
 	}

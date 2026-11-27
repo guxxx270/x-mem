@@ -33,8 +33,7 @@ func (t Tier) String() string {
 	return "none"
 }
 
-// Thresholds. They start from the values that worked in 旧记忆库 and are tuned
-// against the regression set in testdata/.
+// Thresholds tuned against the regression set in testdata/.
 const (
 	directCoverage   = 0.6 // share of the question's content units a note covers
 	directMinCovered = 2   // and at least this many units
@@ -229,8 +228,8 @@ func Search(ix *index.Index, query string, opt Options) Result {
 	return res
 }
 
-// related follows the answer's ties to notes the question did not name:
-// 旧记忆库's "a whole patch comes to mind", from the store's own links.
+// related follows the answer's ties to notes the question did not name,
+// using the store's own relations, wiki-links and shared sessions.
 func related(ix *index.Index, hits []Hit, tier Tier) []*index.Doc {
 	shown := map[*index.Doc]bool{}
 	for _, h := range hits {

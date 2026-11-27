@@ -49,6 +49,18 @@ func hostKind(host []string) string {
 	return ""
 }
 
+var systemHostDirs = func(kind, home string) []string {
+	dirs := []string{"/opt/homebrew/bin", "/usr/local/bin", filepath.Join(home, ".local/bin"),
+		filepath.Join(home, ".npm-global/bin"), filepath.Join(home, ".bun/bin")}
+	if kind == "codex" { // the command line that comes with the Codex app
+		for _, app := range []string{"/Applications/Codex.app", filepath.Join(home, "Applications/Codex.app")} {
+			dirs = append(dirs, filepath.Join(app, "Contents/Resources/codex-cli/bin"),
+				filepath.Join(app, "Contents/Resources/codex-cli/codex-path"), filepath.Join(app, "Contents/Resources"))
+		}
+	}
+	return dirs
+}
+
 // HostBinary finds the program for a preset: codex, agy or claude.
 func HostBinary(kind string) (string, bool) {
 	name := map[string]string{"codex": "codex", "antigravity": "agy", "claude": "claude"}[kind]
@@ -59,15 +71,7 @@ func HostBinary(kind string) (string, bool) {
 		return p, true
 	}
 	home, _ := os.UserHomeDir()
-	dirs := []string{"/opt/homebrew/bin", "/usr/local/bin", filepath.Join(home, ".local/bin"),
-		filepath.Join(home, ".npm-global/bin"), filepath.Join(home, ".bun/bin")}
-	if kind == "codex" { // the command line that comes with the Codex app
-		for _, app := range []string{"/Applications/Codex.app", filepath.Join(home, "Applications/Codex.app")} {
-			dirs = append(dirs, filepath.Join(app, "Contents/Resources/codex-cli/bin"),
-				filepath.Join(app, "Contents/Resources/codex-cli/codex-path"), filepath.Join(app, "Contents/Resources"))
-		}
-	}
-	for _, dir := range dirs {
+	for _, dir := range systemHostDirs(kind, home) {
 		p := filepath.Join(dir, name)
 		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
 			return p, true
@@ -196,4 +200,10 @@ func HostName(host []string) string {
 		return "Claude Code（" + bin + " -p）"
 	}
 	return strings.Join(host, " ")
+}
+
+// RunHost asks the host agent one question, as session capture does, and
+// returns its answer. The prompt must start with transcript.HostMarker.
+func RunHost(l config.Layers, host []string, prompt string) (string, error) {
+	return runHost(l, host, prompt)
 }

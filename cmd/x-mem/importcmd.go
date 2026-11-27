@@ -14,8 +14,8 @@ import (
 )
 
 func cmdImport(args []string) error {
-	if len(args) == 0 || args[0] != "old-mem" {
-		return fmt.Errorf("用法：x-mem import obsidian [库目录] [--dry-run] [--force]")
+	if len(args) == 0 || (args[0] != "obsidian" && args[0] != "vault") {
+		return fmt.Errorf("用法：x-mem import obsidian <库目录> [--dry-run] [--force]")
 	}
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
 	dry := fs.Bool("dry-run", false, "只列出会做什么，不写文件")
@@ -23,12 +23,12 @@ func cmdImport(args []string) error {
 	fs.Parse(reorder(fs, args[1:]))
 	vault := fs.Arg(0)
 	if vault == "" {
-		vault = defaultVault()
+		vault = os.Getenv("OBSIDIAN_VAULT")
 	}
 	if vault == "" {
-		return fmt.Errorf("没找到 旧记忆库 库：请写上库目录，例如 x-mem import obsidian ~/Documents/知识库")
+		return fmt.Errorf("请指定笔记库目录，例如：x-mem import obsidian ~/Documents/知识库")
 	}
-	plan, err := importer.旧记忆库(vault)
+	plan, err := importer.Vault(vault)
 	if err != nil {
 		return err
 	}
@@ -42,7 +42,7 @@ func cmdImport(args []string) error {
 			rules++
 		}
 	}
-	fmt.Printf("旧记忆库 库：%s\n", vault)
+	fmt.Printf("来源笔记库：%s\n", vault)
 	fmt.Printf("要导入 %d 条：规则与偏好 %d 条（拆成一条一事），其他笔记 %d 条\n", len(plan.Notes), rules, len(plan.Notes)-rules)
 	if *dry {
 		for _, n := range plan.Notes {
@@ -90,7 +90,7 @@ func cmdImport(args []string) error {
 	if written > 0 {
 		if _, err := os.Stat(filepath.Join(l.Personal, ".git")); err == nil {
 			add := exec.Command("git", "-C", l.Personal, "add", "--", "rules/imported", "notes/imported")
-			commit := exec.Command("git", "-C", l.Personal, "commit", "-q", "-m", "从 旧记忆库 导入")
+			commit := exec.Command("git", "-C", l.Personal, "commit", "-q", "-m", "从 Obsidian 笔记库导入")
 			if add.Run() == nil && commit.Run() == nil {
 				fmt.Println("已在个人层提交一次 git（撤销：git -C " + l.Personal + " revert HEAD）")
 			}
@@ -103,25 +103,6 @@ func cmdImport(args []string) error {
 	defer ix.Close()
 	fmt.Printf("索引：%d 条笔记，%d 条生效。运行 x-mem doctor 检查有没有问题。\n", len(ix.Docs), ix.N)
 	return nil
-}
-
-// defaultVault finds the vault 旧记忆库's installer recorded.
-func defaultVault() string {
-	for _, env := range []string{"LEGACY_VAULT", "OBSIDIAN_VAULT"} {
-		if v := os.Getenv(env); v != "" {
-			return v
-		}
-	}
-	cfg := os.Getenv("XDG_CONFIG_HOME")
-	if cfg == "" {
-		home, _ := os.UserHomeDir()
-		cfg = filepath.Join(home, ".config")
-	}
-	data, err := os.ReadFile(filepath.Join(cfg, "old-mem", "vault"))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])
 }
 
 // reorder moves flags (and their values) in front of positional arguments,

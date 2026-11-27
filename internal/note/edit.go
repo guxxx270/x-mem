@@ -16,6 +16,8 @@ type Draft struct {
 	Triggers        []string
 	Enforcement     string
 	Sensitivity     string
+	When            string
+	Sources         []string
 	Body            string
 }
 
@@ -59,6 +61,10 @@ func (d Draft) Render() string {
 	if d.Sensitivity != "" {
 		fmt.Fprintf(&b, "sensitivity: %s\n", d.Sensitivity)
 	}
+	if d.When != "" {
+		fmt.Fprintf(&b, "when: %s\n", Quote(d.When))
+	}
+	writeList(&b, "sources", d.Sources)
 	b.WriteString("---\n")
 	b.WriteString(strings.TrimSpace(d.Body))
 	b.WriteString("\n")

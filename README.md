@@ -8,14 +8,38 @@
 
 ## 安装
 
+**用插件（推荐，也是分享给组员的方式）**——仓库本身就是一个插件市场，插件里带着 macOS / Linux / Windows 的程序：
+
+```text
+Claude Code：  /plugin marketplace add guxxx270/x-mem
+               /plugin install x-mem@x-mem
+Codex：        codex plugin marketplace add guxxx270/x-mem，然后在 App 的 Plugins 里安装 x-mem
+               装好后信任一次插件的钩子（CLI 输入 /hooks；App 在 设置 → Hooks）
+               （若当前版本的 Codex 不跑插件钩子，MCP 照常可用；要钩子就改用下面的脚本或手动装）
+Antigravity：  git clone 仓库后 agy plugin install ./x-mem/plugin
+               （或 App 的 Customizations → Plugins；IDE 版可能不运行插件的钩子，MCP 照常可用）
+```
+
+插件第一次运行时把对应平台的程序放到 `~/.x-mem/bin/x-mem`，几个应用、命令行和定时任务都用这一份；插件升级了就换成新的，你自己装的更新版本不会被换掉。第一条记忆写入时自动建个人层（`~/.x-mem/personal`，带 git）。命令行要用就把 `~/.x-mem/bin` 加进 PATH（Claude Code 里直接能用 `x-mem`）。
+
+仓库是私有的：组员要先被加为协作者（或在组织里有读权限）才能 `marketplace add`。不想给仓库权限时，用 `go run ./tools/buildplugin -zip` 打出 `dist/x-mem-plugin-<版本>.zip`，解压后 `/plugin marketplace add ./x-mem-plugin`（Codex 同理，Antigravity 用 `agy plugin install ./x-mem-plugin/plugin`）。每个人的记忆都在自己机器上，插件不共享任何人的笔记；想共享的是项目约定，就在仓库里 `x-mem init` 建 `.x-mem/`、随代码提交。
+
+装了插件就不要再 `x-mem install` 同一个应用（会跑两遍钩子）：`install` 发现插件在就跳过，`doctor` 发现两套都在会提示 `x-mem install <应用> --remove`。
+
+**一键脚本或手动装（三端钩子完整生效）**：
+
 ```bash
-go build -o ~/.x-mem/bin/x-mem ./cmd/x-mem   # 或者用 bin/ 里的预编译版本
+# macOS / Linux 克隆后一键解压预编译二进制并接入全端：
+sh scripts/install.sh
+
+# 或手动从源码编译安装：
+go build -o ~/.x-mem/bin/x-mem ./cmd/x-mem
 x-mem init                                   # 建 ~/.x-mem/personal，并在当前仓库建 .x-mem/
 x-mem install all --apply                    # 本机装了哪个接哪个：Claude Code、Codex、Antigravity、Claude 桌面版
 x-mem doctor                                 # 确认都接好了
 ```
 
-不加 `--apply` 只列出要改什么，不改文件；改之前每个文件都先备份。重复运行会替换旧的 x-mem 条目，不会重复添加；`--remove` 拿掉；`--drop` 顺手把 旧记忆库 的钩子和 MCP 从这几个应用的配置里拿掉（只动配置，不删 旧记忆库 的文件）。
+不加 `--apply` 只列出要改什么，不改文件；改之前每个文件都先备份。重复运行会替换旧的 x-mem 条目，不会重复添加；`--remove` 拿掉；`--drop <旧工具名>` 可顺手把指定旧工具的钩子和 MCP 从配置里拿掉（只动配置，不删文件）。
 
 ## 三端互通
 
@@ -30,26 +54,25 @@ x-mem doctor                                 # 确认都接好了
 | 会话采集 | Stop | Stop | Stop |
 | MCP（recall / read / propose / inbox / status） | `claude mcp add` | `codex mcp add` | `mcp_config.json` |
 
-- **Claude 桌面版**没有钩子，只接 MCP（`claude_desktop_config.json` 里的 `mcpServers.x-mem`）；怎么用记忆写在 MCP 服务连上时下发的说明里。桌面版开着的时候会把设置整份留在内存里、退出时写回，这时改配置会被覆盖，所以 `x-mem install claude-desktop --apply` 发现它开着就不改文件，在后台等它退出后再改，下次打开就接上了（想马上生效就 ⌘Q 退出再打开）。旧记忆库 如果是以扩展装进桌面版的，要在 设置 → 扩展 里卸载。桌面版的对话不存在本机，提案的原话核对不上，会进收件箱等你确认（见下文）。
-- **Codex** 只运行你信任过的钩子：装好后在 Codex 里信任一次（CLI 输入 `/hooks`；App 在 设置 → Hooks）。信任记录按钩子在 `hooks.json` 里的位置算，位置变了（比如删掉了排在前面的 旧记忆库 钩子）要重新信任。`x-mem doctor` 会指出哪几个还没信任。没信任时 MCP 仍然可用（Codex 会按 AGENTS.md 主动 recall），只是每条消息的自动想起和动作前规则不生效。
-- **Antigravity** 的 PreToolUse 必须回 `{"decision":"allow"}` 才放行，回 `{}` 等于拒绝；x-mem 0.4.1 起在没命中规则、出错、关闭时都明确回 allow（0.4.0 有这个问题，会拦下所有工具调用）。Antigravity 第一次调 x-mem 的 MCP 工具时会问你允不允许，选“always allow”以后就不问了。
+- **Claude 桌面版**没有钩子，只接 MCP（`claude_desktop_config.json` 里的 `mcpServers.x-mem`）；怎么用记忆写在 MCP 服务连上时下发的说明里。桌面版开着的时候会把设置整份留在内存里、退出时写回，这时改配置会被覆盖，所以 `x-mem install claude-desktop --apply` 发现它开着就不改文件，在后台等它退出后再改，下次打开就接上了（想马上生效就 ⌘Q 退出再打开）。桌面版的对话不存在本机，提案的原话核对不上，会进收件箱等你确认（见下文）。
+- **Codex** 只运行你信任过的钩子：装好后在 Codex 里信任一次（CLI 输入 `/hooks`；App 在 设置 → Hooks）。信任记录按钩子在 `hooks.json` 里的位置算，位置变了（比如删掉了排在前面的其他钩子）要重新信任。`x-mem doctor` 会指出哪几个还没信任。没信任时 MCP 仍然可用（Codex 会按 AGENTS.md 主动 recall），只是每条消息的自动想起和动作前规则不生效。
+- **Antigravity** 的 PreToolUse 必须回 `{"decision":"allow"}` 才放行，回 `{}` 等于拒绝；x-mem 0.4.1 起在没命中规则、出错、关闭时都明确回 allow。Antigravity 第一次调 x-mem 的 MCP 工具时会问你允不允许，选“always allow”以后就不问了。
 - 规则的触发条件三端通用：`Bash(git push*)` 在 Codex 里匹配它的 shell，在 Antigravity 里匹配 `run_command`；`Edit(*.sql)` 也匹配 Codex 的 `apply_patch` 和 Antigravity 的改文件工具。
 - 原话核对和会话采集读三家各自的会话文件（`~/.claude/projects`、`~/.codex/sessions`、`~/.gemini/antigravity*/brain`），自动跳过 `claude -p`、`codex exec`、`agy -p` 这类无头运行；x-mem 发给整理助手的提示带一个标记，那段会话永远不会被当成你说的话。
 
-### 从 旧记忆库 换过来
+### 导入已有 Obsidian 笔记库
 
 ```bash
-sh scripts/install.sh ~/Documents/知识库
+x-mem import obsidian ~/Documents/知识库 --dry-run   # 先预演
+x-mem import obsidian ~/Documents/知识库             # 正式导入
 ```
 
-依次：安装到 `~/.x-mem/bin` → 建个人层 → 从 旧记忆库 库导入 → 库里没导入的部分（时间日志、会话摘录、资料）登记成知识库 → 接入三端 → 运行 旧记忆库 自带的卸载脚本，再用 `x-mem install all --apply --drop` 清掉卸载脚本漏下的 旧记忆库 钩子和 MCP（Claude Code、Codex、Antigravity、Claude 桌面版，改之前都备份）。旧记忆库 的库和钥匙文件都不动。已经迁移过、只想清 旧记忆库 的残留，单独跑这一条就行。加 `--keep-legacy` 只导入、不停用。
-
-导入规则（也可单独运行 `x-mem import obsidian [库目录] --dry-run` 预演）：
+导入规则：
 
 - 用户偏好页按条拆开，一条一个规则，放进 `rules/imported/`；
 - `01 项目`、`02 经验与方法` 等分区的其他页，一页一条笔记，放进 `notes/imported/`，保持原路径；
-- 别名表里的别名带过来；从 Codex 会话自动提炼的页只保留五个汉字以上的别名（短的英文别名太泛，会误命中）；
-- 时间日志、会话摘录、`90 系统文件`、目录页、没改过的 旧记忆库 示例页不导入；
+- 别名表里的别名自动带入；从历史会话自动提炼的页只保留五个汉字以上的别名（短的英文别名太泛，避免误命中）；
+- 时间日志、会话摘录、`90 系统文件`、目录页、未改过的模板示例页不导入；
 - 已经存在的文件不覆盖（`--force` 才覆盖），个人层是 git 仓库时自动提交一次。
 
 ## 目录
@@ -137,9 +160,26 @@ x-mem capture off
 - 候选交给一个整理助手提炼（x-mem 自己不调模型）：默认是你已登录的 **Codex**（`codex exec`，只读沙箱、低推理强度），也可以用 **Antigravity 命令行**（`agy -p`，需要单独安装并登录过一次；它在后台运行时不输出的已知问题，macOS 上用 `script` 给它一个终端绕过去）。Claude 只有你用 `x-mem capture host claude` 明确选了才会用。`capture on` 时记下程序的完整路径，定时任务也找得到。一个都没有时，原句直接进 inbox。
 - 采集来的提案**默认都等你确认**（`x-mem inbox`）；`config.json` 里 `"auto_apply_capture": true` 可以改成自动写入。
 
+## 技能：经验长成的做法
+
+你记下的教训（lesson）和做法（howto）在讲同一件事、或者某一条反复被用到时，x-mem 请整理助手（和会话采集同一个：默认 Codex）**只根据这几条笔记**起草一个技能：“什么情形下用 + 2～8 步怎么做 + 整理自哪几条”。
+
+```bash
+x-mem skills              # 有哪些技能、各用了几次、有没有够格整理的经验
+x-mem skills grow         # 马上起草（草稿进收件箱）
+x-mem skills on | off     # 单独打开 / 关掉自动整理（默认跟着会话采集）
+x-mem skills retire <id>  # 停用一个技能（不删文件，能 x-mem undo）
+```
+
+- **不会自己生效**：草稿一律进收件箱等你确认（`x-mem inbox review`，或跟 agent 说“过一下收件箱”），确认后写进 `personal/skills/`。
+- **有节制**：自动整理每天最多一次、一次最多两个；同一组笔记只起草一次，你丢掉了就不再问，除非这组又多了新经验；技能停用后，它来自的那几条也不会再长出新技能。够格的标准：至少两条讲同一件事，或者一条在 3 天以上被用到。
+- **默认关**：只有打开了会话采集（已经同意让整理助手在后台跑），或者 `x-mem skills on`，才会自动整理。
+- **怎么用上**：会话开始列出技能名、id 和适用情形（最多 8 个，用得多的在前），手上的事正好是那种情形时 agent 用 `read` 取全文照做。也可以直接让 agent 记：“把刚才这套做法存成技能”，它用 `propose` 提 kind=skill。
+- **用到了几次**记在 `state/usage.jsonl`（钩子递过、recall 返回、read 打开的笔记 id 和时间，不记你说的话，超过 512 KB 自动砍半）。60 天没用过的技能，`x-mem doctor` 会提醒你要不要停用。
+
 ## 想起来：目录、直接依据、联想
 
-- **会话开始**：给出规则与偏好、本项目最近的决定，以及**记忆目录**——其余每条笔记的标题和别名（约 1500 token 以内，项目层和最近改过的优先）。人说话往往不点名字，agent 看到目录里有相关的主题，会自己去取。
+- **会话开始**：给出规则与偏好、你的技能、本项目最近的决定，以及**记忆目录**——其余每条笔记的标题和别名（约 1500 token 以内，项目层和最近改过的优先）。人说话往往不点名字，agent 看到目录里有相关的主题，会自己去取。
 - **每条消息**：只在有直接依据时递一两条，无关的话一个字不加。
 - **recall 的回答**：除了命中的笔记，还会带出和它们有关联的笔记（关系、`[[链接]]`、同一段会话来的），最多 2 条；以及知识库里对得上的资料，单独一块、标明不是你定过的事。
 
@@ -160,7 +200,7 @@ x-mem kb remove <目录>
 - 回答里引用的那一行带上位置：PDF 是“第 N 页”，PPT 是“幻灯片 N”，Excel 是“工作表 名称”；PDF 里被排版折断的中文句子会接回去，`⼯`（康熙部首）这类字会换成平常的 `工`，方便搜到。
 - 读不出来的（扫描件没有文字层、要密码才能打开、字体没带字符对照表）在 `kb list` 和 `doctor` 里列出来，不会悄悄漏掉。扫描件要先 OCR。
 
-知识库里的页能被 recall 查到、带出处，但**不算记忆**：不影响 direct / related / none 的判断，不进钩子注入，不能被取代，也从不写入。只有知识库对得上时，回答第一行是 `memory: none`，下面列出资料；旧记忆库 留下的会话摘录会标成“会话摘录：结论是模型提炼的，未经确认”。
+知识库里的页能被 recall 查到、带出处，但**不算记忆**：不影响 direct / related / none 的判断，不进钩子注入，不能被取代，也从不写入。只有知识库对得上时，回答第一行是 `memory: none`，下面列出资料；历史会话摘录页会标成“会话摘录：当时的讨论，结论是模型提炼的，未经确认”。
 
 ## 钩子做什么
 
@@ -219,31 +259,13 @@ go run ./tools/bench -bin bin/x-mem -notes 1000
 | 四 | 知识库 22MB 文字时写一条笔记，下一次查询 | 约 50ms（不重读文档） |
 | 四 | Claude 桌面版开着时安装不改配置，退出后自动接上 | 通过 |
 
-## 和设计文档不一样的地方
+## 实现细节说明
 
 - **索引没用 SQLite**：纯 Go 的两个缓存文件（元数据 + 倒排表，倒排按需读取），零依赖，延迟也达标。
 - **写入进程不常驻**：用文件锁保证同一时间只有一个写入者，谁需要写谁拿锁；Stop 钩子在后台拉起 `x-mem writer --once`，launchd 只在打开采集时每 30 分钟跑一次。效果和常驻进程一样，少一个要照看的后台服务。
 - **提案放在 `state/inbox`**，不放在层目录的 `inbox/`：提案可能带未审核的内容，不该进项目仓库的 git。层目录的 `inbox/` 留给你自己放草稿。
 - **项目层不自动提交**、**采集来的提案默认等你确认**：都可以在 `config.json` 里打开。
 
-## 和 旧记忆库 的对照
-
-| 旧记忆库 的能力 | x-mem |
-|---|---|
-| 提到就想起（每句话 + 会话开始的索引） | 有：每条消息只递 direct；会话开始给规则和记忆目录；三端都有 |
-| 联想到相关的一片 | 有：recall 带出有关联的笔记（关系、链接、同一段会话） |
-| 托底：出处、三档、改了主意只认新的 | 有，并修了 旧记忆库 的整页作废、撤回撞车、别名被否决、脱敏漏网 |
-| 你的知识库（参考资料单独列） | 有：`x-mem kb` |
-| 纠正、写入、撤回 | 有：先提案、核对原话、单写入、按次撤回 |
-| 会话采集与提炼 | 有：默认关，三端都读，提炼的结果等你确认才写入 |
-| 规则在动作前触发 | 有（旧记忆库 只在 Cursor 上有执行前拦截） |
-| 夜间自动整理、自动写日更 / 时间日志 | 没做：设计上不做不经你确认的自动改写 |
-| 经验长成技能、60 天没用的往后排 | 没做：只有最近改过的稍靠前 |
-| 团队服务、Cursor 等其他应用 | 没做；任何支持 MCP 的应用都能手动接 `x-mem mcp` |
-| 扫描件 OCR | 没做 |
-| PDF / Word 转进知识库 | 有：Word、PDF、Excel、PPT、WPS 等都能直接放进知识库 |
-| Claude 桌面版 | 有：MCP + 下发的使用说明 |
-
-## 之后再评估
+## 后续方向
 
 词典分词、向量检索：都要在回归题集上证明有提升才加。

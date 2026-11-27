@@ -34,6 +34,8 @@ type Note struct {
 	Sensitivity   string
 	SourceQuote   string
 	SourceSession string
+	When          string   // skill: the situation it is for
+	Sources       []string // skill: ids of the notes it grew from
 	Body          string
 
 	Layer string // "personal" or "project"
@@ -64,6 +66,8 @@ func Parse(src, rel string) *Note {
 		n.Triggers = strList(m["triggers"])
 		n.Enforcement = strings.ToLower(strings.TrimSpace(str(m["enforcement"])))
 		n.Sensitivity = strings.ToLower(strings.TrimSpace(str(m["sensitivity"])))
+		n.When = strings.TrimSpace(str(m["when"]))
+		n.Sources = strList(m["sources"])
 		if src, ok := m["source"].(map[string]any); ok {
 			n.SourceQuote = strings.TrimSpace(str(src["quote"]))
 			n.SourceSession = strings.TrimSpace(str(src["session"]))

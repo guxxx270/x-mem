@@ -52,7 +52,7 @@ type: preference
 - 时间日志文件名用 DD｜一句话概要。
 `
 
-// 旧记忆库's bug: one correction retired a whole page of unrelated rules.
+// Replacing one bullet must not retire a whole page of unrelated rules.
 func TestLineSupersedeKeepsTheOtherRules(t *testing.T) {
 	l := vault(t, map[string]string{
 		"notes/rules.md": rulesPage,

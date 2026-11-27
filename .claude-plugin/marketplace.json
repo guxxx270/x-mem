@@ -1,0 +1,16 @@
+{
+  "description": "x-mem：Claude Code、Codex、Antigravity 共用的本地记忆",
+  "name": "x-mem",
+  "owner": {
+    "name": "Jerry Gu"
+  },
+  "plugins": [
+    {
+      "category": "productivity",
+      "description": "本地记忆：你定过的事、规则和偏好，几个 agent 共用一份；回答带出处，记忆里没有就直说没有。",
+      "name": "x-mem",
+      "source": "./plugin",
+      "version": "0.6.0"
+    }
+  ]
+}

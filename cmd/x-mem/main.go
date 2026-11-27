@@ -41,6 +41,7 @@ const usage = `x-mem：给编程 agent 用的本地记忆
   x-mem undo <run>                撤回一次写入
   x-mem log                       最近的写入
   x-mem capture on|off|status     会话自动采集（默认关）
+  x-mem skills [grow|on|off|retire <id>]   从你记下的经验里长出的技能（草稿进收件箱，确认后才生效）
   x-mem writer [--once]           写入进程（平时由钩子和定时任务拉起）
 
 管理：
@@ -48,12 +49,12 @@ const usage = `x-mem：给编程 agent 用的本地记忆
   x-mem status / doctor           状态 / 体检
   x-mem reindex                   删掉索引重建（平时不需要）
   x-mem eval <题集.json>          跑回归题集
-  x-mem import obsidian [库目录]   从 旧记忆库 库导入（--dry-run 先预演）
+  x-mem import obsidian <库目录>  从 Obsidian 笔记库导入（--dry-run 先预演）
   x-mem kb add <目录> [--exclude 子目录]   把资料文件夹登记成知识库：能查、带出处（PDF 带页码），不算记忆
                                   认 Markdown、Word（docx/doc）、PDF、Excel（xlsx/xls）、PowerPoint（pptx/ppt）、
                                   WPS/LibreOffice（odt/ods/odp）、EPUB、RTF、HTML、txt/csv（含 GBK 编码）
   x-mem kb list / read / remove   看知识库（读不出的文件也列出来）/ 马上读完新文件 / 移除
-  x-mem install claude-code|codex|antigravity|claude-desktop|all   接入这些应用（--apply 直接改配置，先备份；--remove 拿掉；--drop 顺手清掉 旧记忆库）
+  x-mem install claude-code|codex|antigravity|claude-desktop|all   接入这些应用（--apply 直接改配置，先备份；--remove 拿掉；--drop <旧工具名> 顺手清掉旧工具）
   x-mem hook start|prompt|guard|stop [--client codex|antigravity]   钩子（从标准输入读事件）
   x-mem mcp                       以 MCP 服务运行（stdio）
   x-mem version
@@ -67,6 +68,7 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
+	keepStamp()
 	// Documents added to the knowledge base are read in the background, so
 	// that a hook or a query never waits on a PDF.
 	index.OnPending = func(l config.Layers) {
@@ -90,6 +92,10 @@ func main() {
 		os.Exit(cmdDoctor())
 	case "reindex":
 		err = cmdReindex()
+	case "skills":
+		err = cmdSkills(args)
+	case "self-install":
+		err = cmdSelfInstall(args)
 	case "eval":
 		os.Exit(cmdEval(args))
 	case "hook":
@@ -438,6 +444,17 @@ func cmdDoctor() int {
 		if !installed[c.name] {
 			continue
 		}
+		if app := map[string]string{"Claude Code": "claude-code", "Codex": "codex", "Antigravity": "antigravity"}[c.name]; pluginInstalled(app) {
+			if strings.Contains(c.hooks, "x-mem hook ") {
+				fail("%s：装了 x-mem 插件，配置里还有 x-mem install 写的钩子，每次会跑两遍 → x-mem install %s --remove", c.name, app)
+			} else {
+				ok("%s：通过插件接入", c.name)
+			}
+			if c.name == "Codex" {
+				note("Codex：插件的钩子要在 Codex 里信任一次才会运行（/hooks，App 里是 设置 → Hooks）")
+			}
+			continue
+		}
 		var missing []string
 		for _, ev := range c.events {
 			if !strings.Contains(c.hooks, "x-mem hook "+ev) {
@@ -465,9 +482,6 @@ func cmdDoctor() int {
 				fail("Codex：x-mem 的钩子还没被信任（%s），Codex 不会运行它们 → 在 Codex 里输入 /hooks（App 里是 设置 → Hooks）逐个信任", strings.Join(untrusted, "、"))
 			}
 		}
-		if strings.Contains(strings.ToLower(c.hooks+c.mcp), "old-mem") {
-			note("%s 的配置里还有 旧记忆库 的条目 → x-mem install all --apply --drop（只拿掉配置条目，先备份）", c.name)
-		}
 	}
 	doctorDesktop(ok, note, fail)
 	in := writer.NewInbox(l.State)
@@ -489,6 +503,7 @@ func cmdDoctor() int {
 			fail("会话采集开着，但定时扫描没装 → x-mem capture on")
 		}
 	}
+	doctorSkills(l, ix, ok, note)
 	if bad == 0 {
 		fmt.Println("\n没有发现问题。")
 		return 0

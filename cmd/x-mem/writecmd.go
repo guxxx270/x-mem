@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"x-mem/internal/capture"
+	"x-mem/internal/skills"
 	"x-mem/internal/writer"
 )
 
@@ -21,7 +22,8 @@ func (m *multi) Set(v string) error { *m = append(*m, v); return nil }
 // x-mem remember [选项] 内容
 func cmdRemember(args []string) error {
 	fs := flag.NewFlagSet("remember", flag.ExitOnError)
-	kind := fs.String("kind", "fact", "decision / rule / preference / fact / lesson / howto")
+	kind := fs.String("kind", "fact", "decision / rule / preference / fact / lesson / howto / skill")
+	when := fs.String("when", "", "技能：什么情形下用")
 	title := fs.String("title", "", "标题（默认取正文第一句）")
 	scope := fs.String("scope", "", "personal 或 project（默认：规则、偏好进个人层，其他进当前项目层）")
 	sup := fs.String("supersedes", "", "取代哪条笔记（id、文件名或标题）")
@@ -43,7 +45,7 @@ func cmdRemember(args []string) error {
 	}
 	p := &writer.Proposal{
 		Source: "cli", Project: l.Project, Kind: *kind, Title: *title, Text: text, Scope: *scope,
-		Supersedes: *sup, Line: *line, Relation: *rel, Aliases: aliases, Triggers: triggers,
+		Supersedes: *sup, Line: *line, Relation: *rel, Aliases: aliases, Triggers: triggers, When: *when,
 	}
 	if *block {
 		p.Enforcement = "block"
@@ -108,7 +110,7 @@ func cmdInbox(args []string) error {
 			return err
 		}
 		fmt.Printf("提案 %s（%s，来源 %s，%s）\n类型：%s  层：%s\n标题：%s\n\n%s\n", p.ID, statusName(p.Status), p.Source,
-			p.Created.Format("2006-01-02 15:04"), p.Kind, p.Scope, p.Title, p.Text)
+			p.Created.Format("2006-01-02 15:04"), p.Kind, p.Scope, p.Title, p.Shown())
 		if p.Quote != "" {
 			fmt.Printf("\n原话：%s（%s）\n", p.Quote, p.Session)
 		}
@@ -200,7 +202,7 @@ func reviewInbox(w *writer.Writer, stdin *os.File) error {
 	}
 	r := bufio.NewReader(stdin)
 	for i, p := range ps {
-		fmt.Printf("\n[%d/%d] %s（%s，%s）\n  %s\n", i+1, len(ps), p.Title, p.Kind, p.Created.Format("01-02 15:04"), p.Text)
+		fmt.Printf("\n[%d/%d] %s（%s，%s）\n  %s\n", i+1, len(ps), p.Title, p.Kind, p.Created.Format("01-02 15:04"), strings.ReplaceAll(p.Shown(), "\n", "\n  "))
 		if p.Quote != "" {
 			fmt.Printf("  原话：%s\n", p.Quote)
 		}
@@ -328,6 +330,11 @@ func cmdWriter(args []string) error {
 			logWriter(l.State, "capture: "+err.Error())
 		} else if n > 0 {
 			fmt.Printf("%s 采集到 %d 条候选，见 x-mem inbox\n", time.Now().Format("15:04"), n)
+		}
+		if got, err := skills.Grow(l, w, time.Now(), false); err != nil {
+			logWriter(l.State, "skills: "+err.Error())
+		} else if len(got) > 0 {
+			fmt.Printf("%s 起草了 %d 个技能，见 x-mem inbox\n", time.Now().Format("15:04"), len(got))
 		}
 		if n, err := w.ProcessQueue(); err != nil && !errors.Is(err, writer.ErrBusy) {
 			logWriter(l.State, "write: "+err.Error())

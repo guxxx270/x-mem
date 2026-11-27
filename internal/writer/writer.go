@@ -25,7 +25,7 @@ import (
 const MaxRunes = 2000
 
 // Kinds a proposal may have.
-var Kinds = []string{"decision", "rule", "preference", "fact", "lesson", "howto", "project", "convention", "policy"}
+var Kinds = []string{"decision", "rule", "preference", "fact", "lesson", "howto", "project", "convention", "policy", "skill"}
 
 // Settings are the user's choices, from ~/.x-mem/config.json.
 type Settings struct {
@@ -157,8 +157,9 @@ func (w *Writer) normalize(p *Proposal) {
 	if p.Sensitivity == "confidential" {
 		p.Scope = "personal"
 	}
+	p.When = strings.TrimSpace(p.When)
 	if p.Scope == "" {
-		if isRuleKind(p.Kind) || p.Project == "" {
+		if isRuleKind(p.Kind) || p.Kind == "skill" || p.Project == "" {
 			p.Scope = "personal"
 		} else {
 			p.Scope = "project"
@@ -180,6 +181,7 @@ func (w *Writer) normalize(p *Proposal) {
 	}
 	p.Title = clean(p.Title)
 	p.Text = clean(p.Text)
+	p.When = clean(p.When)
 	p.Context = clean(p.Context)
 	for i := range p.Aliases {
 		p.Aliases[i] = clean(p.Aliases[i])
@@ -224,7 +226,13 @@ func (w *Writer) check(p *Proposal, ix *index.Index, verifyQuote bool) []string 
 			add("触发条件 %q 写法不对：%v", t, err)
 		}
 	}
-	if note.Suspicious(p.Title + "\n" + p.Text) {
+	if p.Kind == "skill" && p.When == "" {
+		add("技能要写清楚什么时候用（when）")
+	}
+	if p.Kind != "skill" && (p.When != "" || len(p.Sources) > 0) {
+		add("只有技能（skill）带 when 和 sources")
+	}
+	if note.Suspicious(p.Title + "\n" + p.When + "\n" + p.Text) {
 		add("内容像是在给 agent 下指令（例如“忽略之前的指令”），不写入")
 	}
 
@@ -282,13 +290,16 @@ func (w *Writer) check(p *Proposal, ix *index.Index, verifyQuote bool) []string 
 	if p.Source == "capture" && !w.Settings.AutoApplyCapture {
 		p.Review = "从会话里自动采集的，确认后才写入"
 	}
+	if p.Source == "skills" {
+		p.Review = "从你记下的经验里整理出的技能草稿，确认后才生效"
+	}
 	if unverified {
 		p.Review = "原话没在本机的会话记录里核对上（Claude 桌面版的对话不存在本机；也可能是 agent 改写了你的话），确认后才写入"
 		p.Unverified = true
 	}
 	res := recall.Search(ix, p.Title+"\n"+p.Text, recall.Options{Limit: 3, Now: w.Now(), NoRelated: true})
 	for _, h := range res.Hits {
-		if h.Tier != recall.Direct || h.Doc == target {
+		if h.Tier != recall.Direct || h.Doc == target || contains(p.Sources, h.Doc.ID) {
 			continue
 		}
 		p.Candidates = append(p.Candidates, h.Doc.ID)
@@ -428,6 +439,8 @@ func (w *Writer) applyLocked(p *Proposal) error {
 	root := l.Personal
 	if p.Scope == "project" {
 		root = l.Project
+	} else if _, err := config.EnsurePersonal(l); err != nil {
+		return err
 	}
 	if st, err := os.Stat(root); err != nil || !st.IsDir() {
 		return fmt.Errorf("记忆库目录不存在：%s（先运行 x-mem init）", root)
@@ -440,6 +453,8 @@ func (w *Writer) applyLocked(p *Proposal) error {
 	sub := "notes"
 	if isRuleKind(p.Kind) {
 		sub = "rules"
+	} else if p.Kind == "skill" {
+		sub = "skills"
 	}
 	name := fileTitle(p.Title) + "-" + id[len(id)-5:] + ".md"
 	path := filepath.Join(root, sub, name)
@@ -448,7 +463,7 @@ func (w *Writer) applyLocked(p *Proposal) error {
 		ID: id, Title: p.Title, Type: p.Kind, Aliases: p.Aliases,
 		ValidFrom: now.Format("2006-01-02"), Quote: p.Quote, Session: p.Session,
 		Triggers: p.Triggers, Enforcement: p.Enforcement, Sensitivity: p.Sensitivity,
-		Body: p.Text,
+		When: p.When, Sources: p.Sources, Body: p.Text,
 	}
 	if p.QuoteAt != "" {
 		d.At = p.QuoteAt
@@ -555,6 +570,20 @@ func repoRoot(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func realOrParent(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	if d, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(d, filepath.Base(p))
+	}
+	return p
+}
+
+func repoRel(root, p string) (string, error) {
+	return filepath.Rel(realOrParent(root), realOrParent(p))
+}
+
 // commit records exactly these paths, leaving anything else you have staged
 // alone.
 func commit(root string, paths []string, msg string) error {
@@ -563,7 +592,7 @@ func commit(root string, paths []string, msg string) error {
 	}
 	rel := make([]string, 0, len(paths))
 	for _, p := range paths {
-		r, err := filepath.Rel(root, p)
+		r, err := repoRel(root, p)
 		if err != nil {
 			r = p
 		}

@@ -49,6 +49,10 @@ func cmdCapture(args []string) error {
 		fmt.Println("不想被记的话放在 <private>…</private> 里；整个会话不想被记，就在消息里写 #不记。")
 		if exe, err := os.Executable(); err == nil {
 			exe, _ = filepath.EvalSymlinks(exe)
+			// The job must outlive plugin updates: use the stable copy.
+			if _, err := os.Stat(stableBinary()); err == nil {
+				exe = stableBinary()
+			}
 			msg, err := capture.InstallTimer(exe, l.State)
 			if err != nil {
 				fmt.Println("定时扫描没装上：", err)

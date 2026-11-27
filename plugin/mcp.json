@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "x-mem": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "for r in \"$1\" \"$PLUGIN_ROOT\" \"$CLAUDE_PLUGIN_ROOT\" \"$PWD\"; do [ -n \"$r\" ] && [ -f \"$r/bin/x-mem\" ] && exec sh \"$r/bin/x-mem\" mcp; done; exec \"$HOME/.x-mem/bin/x-mem\" mcp",
+        "x-mem",
+        "${PLUGIN_ROOT}"
+      ]
+    }
+  }
+}

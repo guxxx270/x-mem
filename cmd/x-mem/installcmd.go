@@ -25,7 +25,7 @@ import (
 // running it twice is harmless) and everything else in the file stays.
 // --remove takes x-mem out again.
 func cmdInstall(args []string) error {
-	usage := errors.New("用法：x-mem install claude-code|codex|antigravity|claude-desktop|all [--apply] [--remove] [--drop]")
+	usage := errors.New("用法：x-mem install claude-code|codex|antigravity|claude-desktop|all [--apply] [--remove] [--drop <旧工具名>]")
 	if len(args) == 0 {
 		return usage
 	}
@@ -33,7 +33,7 @@ func cmdInstall(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	apply := fs.Bool("apply", false, "直接修改配置（先备份）")
 	remove := fs.Bool("remove", false, "把 x-mem 从这个应用里拿掉")
-	dropKR := fs.Bool("drop-old-mem", false, "顺手把 旧记忆库 的钩子和 MCP 从这些应用的配置里拿掉（不删 旧记忆库 自己的文件）")
+	drop := fs.String("drop", "", "顺手把指定旧工具的钩子和 MCP 从这些应用的配置里拿掉（只改配置，先备份）")
 	afterQuit := fs.Bool("after-quit", false, "（内部用）等 Claude 桌面版退出后再改它的配置")
 	fs.Parse(args[1:])
 
@@ -44,7 +44,7 @@ func cmdInstall(args []string) error {
 	if r, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = r
 	}
-	in := installer{exe: exe, apply: *apply || *remove, remove: *remove, dropLegacy: *dropKR, afterQuit: *afterQuit}
+	in := installer{exe: exe, apply: *apply || *remove, remove: *remove, drop: strings.TrimSpace(*drop), afterQuit: *afterQuit}
 	var targets []string
 	switch target {
 	case "claude-code", "claude":
@@ -66,6 +66,10 @@ func cmdInstall(args []string) error {
 	}
 	for _, t := range targets {
 		fmt.Printf("\n== %s\n", t)
+		if !in.remove && pluginInstalled(t) {
+			in.say("已经通过 x-mem 插件接入，不用再装（要改回手动接入，先在应用里卸掉插件）")
+			continue
+		}
 		var err error
 		switch t {
 		case "claude-code":
@@ -146,8 +150,8 @@ func geminiConfigDir() string {
 func settingsPath() string { return filepath.Join(claudeDir(), "settings.json") }
 
 type installer struct {
-	exe                                   string
-	apply, remove, dropLegacy, afterQuit bool
+	exe, drop                string
+	apply, remove, afterQuit bool
 }
 
 func (in installer) say(format string, a ...any) { fmt.Printf("  "+format+"\n", a...) }
@@ -178,14 +182,15 @@ func (in installer) claude() error {
 		[]string{"mcp", "remove", "--scope", "user", "x-mem"}); err != nil {
 		return err
 	}
-	if in.dropLegacy && in.apply && !in.remove {
+	if in.drop != "" && in.apply && !in.remove {
 		var cfg struct {
 			Servers map[string]any `json:"mcpServers"`
 		}
 		raw, _ := os.ReadFile(filepath.Join(home(), ".claude.json"))
 		_ = json.Unmarshal(raw, &cfg)
+		pat := strings.ToLower(in.drop)
 		for name, v := range cfg.Servers {
-			if strings.Contains(strings.ToLower(name), "old-mem") || mentionsLegacy(v) {
+			if name != "x-mem" && (strings.Contains(strings.ToLower(name), pat) || mentionsTool(v, pat)) {
 				in.dropMCP("claude", name, []string{"mcp", "remove", "--scope", "user", name})
 			}
 		}
@@ -197,25 +202,31 @@ func (in installer) claude() error {
 func (in installer) dropMCP(bin, name string, args []string) {
 	path, err := exec.LookPath(bin)
 	if err != nil {
-		in.say("旧记忆库 的 MCP（%s）请手动去掉：%s %s", name, bin, strings.Join(quoteAll(args), " "))
+		in.say("旧工具的 MCP（%s）请手动去掉：%s %s", name, bin, strings.Join(quoteAll(args), " "))
 		return
 	}
 	if out, err := exec.Command(path, args...).CombinedOutput(); err != nil {
-		in.say("旧记忆库 的 MCP（%s）没去掉：%s", name, strings.TrimSpace(string(out)))
+		in.say("旧工具的 MCP（%s）没去掉：%s", name, strings.TrimSpace(string(out)))
 		return
 	}
-	in.say("旧记忆库 的 MCP 已去掉：%s", name)
+	in.say("旧工具的 MCP 已去掉：%s", name)
 }
 
 var tomlSection = regexp.MustCompile(`(?m)^\[mcp_servers\.("?)([^\]"]+)("?)\]\s*$`)
 
-// codexMatchingServers lists the MCP servers in Codex's config.toml that run
-// 旧记忆库.
-func codexMatchingServers(toml string) []string {
+// codexMatchingServers lists the MCP servers in Codex's config.toml matching pattern.
+func codexMatchingServers(toml, pattern string) []string {
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	if pattern == "" {
+		return nil
+	}
 	var names []string
 	locs := tomlSection.FindAllStringSubmatchIndex(toml, -1)
 	for i, loc := range locs {
 		name := toml[loc[4]:loc[5]]
+		if name == "x-mem" {
+			continue
+		}
 		end := len(toml)
 		if i+1 < len(locs) {
 			end = locs[i+1][0]
@@ -224,7 +235,7 @@ func codexMatchingServers(toml string) []string {
 			end = loc[1] + next
 		}
 		body := strings.ToLower(name + toml[loc[1]:end])
-		if strings.Contains(body, "old-mem") {
+		if strings.Contains(body, pattern) {
 			names = append(names, name)
 		}
 	}
@@ -248,9 +259,9 @@ func (in installer) codex() error {
 	if err := in.mcpCLI("codex", []string{"mcp", "add", "x-mem", "--", in.exe, "mcp"}, []string{"mcp", "remove", "x-mem"}); err != nil {
 		return err
 	}
-	if in.dropLegacy && in.apply && !in.remove {
+	if in.drop != "" && in.apply && !in.remove {
 		raw, _ := os.ReadFile(filepath.Join(codexDir(), "config.toml"))
-		for _, name := range codexMatchingServers(string(raw)) {
+		for _, name := range codexMatchingServers(string(raw), in.drop) {
 			in.dropMCP("codex", name, []string{"mcp", "remove", name})
 		}
 	}
@@ -289,18 +300,21 @@ func (in installer) antigravity() error {
 	if err := in.jsonKey(filepath.Join(dir, "mcp_config.json"), []string{"mcpServers", "x-mem"}, server); err != nil {
 		return err
 	}
-	if in.dropLegacy && in.apply {
-		in.dropMatchingEntries(dir)
+	if in.drop != "" && in.apply {
+		in.dropMatchingEntries(dir, in.drop)
 	}
 	return in.block(filepath.Join(dir, "AGENTS.md"))
 }
 
-// dropMatchingEntries removes 旧记忆库's MCP server and hook blocks from
-// Antigravity's config: 旧记忆库's own uninstaller does not know Antigravity.
-func (in installer) dropMatchingEntries(dir string) {
-	isKR := func(name string, v json.RawMessage) bool {
-		s := strings.ToLower(name + string(v))
-		return strings.Contains(s, "old-mem") || strings.Contains(s, "mcp_server.py")
+// dropMatchingEntries removes matching MCP server and hook blocks from
+// Antigravity's config.
+func (in installer) dropMatchingEntries(dir, pattern string) {
+	pat := strings.ToLower(strings.TrimSpace(pattern))
+	if pat == "" {
+		return
+	}
+	matches := func(name string, v json.RawMessage) bool {
+		return strings.Contains(strings.ToLower(name+string(v)), pat)
 	}
 	if raw, err := os.ReadFile(filepath.Join(dir, "mcp_config.json")); err == nil {
 		var cfg struct {
@@ -308,7 +322,7 @@ func (in installer) dropMatchingEntries(dir string) {
 		}
 		if json.Unmarshal(raw, &cfg) == nil {
 			for name, v := range cfg.Servers {
-				if isKR(name, v) {
+				if name != "x-mem" && matches(name, v) {
 					in.jsonKey(filepath.Join(dir, "mcp_config.json"), []string{"mcpServers", name}, nil)
 				}
 			}
@@ -318,7 +332,7 @@ func (in installer) dropMatchingEntries(dir string) {
 		var blocks map[string]json.RawMessage
 		if json.Unmarshal(raw, &blocks) == nil {
 			for name, v := range blocks {
-				if name != "x-mem" && isKR(name, v) {
+				if name != "x-mem" && matches(name, v) {
 					in.jsonKey(filepath.Join(dir, "hooks.json"), []string{name}, nil)
 				}
 			}
@@ -363,12 +377,12 @@ func (in installer) hooksFile(path string, ours map[string]any) error {
 	if in.remove {
 		ours = nil
 	}
-	backup, dropped, err := mergeHooks(path, ours, in.remove, in.dropLegacy)
+	backup, dropped, err := mergeHooks(path, ours, in.remove, in.drop)
 	if err != nil {
 		return err
 	}
 	if dropped > 0 {
-		in.say("旧记忆库 的钩子已拿掉：%d 个", dropped)
+		in.say("旧工具的钩子已拿掉：%d 个", dropped)
 	}
 	if backup != "" {
 		in.say("已备份：%s", backup)
@@ -503,9 +517,10 @@ func (in installer) block(path string) error {
 // whose command runs "x-mem hook" are replaced (or, with remove, dropped);
 // every other group and top-level key stays where it was.
 //
-// With dropLegacy, hooks that run 旧记忆库 are taken out too, one by one, so
-// another tool's hook sharing a group with one stays.
-func mergeHooks(path string, ours map[string]any, remove, dropLegacy bool) (backup string, dropped int, err error) {
+// With drop set, hooks matching that tool name are taken out too, one by one,
+// so another tool's hook sharing a group stays.
+func mergeHooks(path string, ours map[string]any, remove bool, drop string) (backup string, dropped int, err error) {
+	pat := strings.ToLower(strings.TrimSpace(drop))
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return "", 0, err
@@ -535,9 +550,9 @@ func mergeHooks(path string, ours map[string]any, remove, dropLegacy bool) (back
 			if isOurHook(g) {
 				continue
 			}
-			if dropLegacy {
+			if pat != "" {
 				var n int
-				if g, n = withoutLegacy(g); n > 0 {
+				if g, n = withoutTool(g, pat); n > 0 {
 					dropped += n
 					if g == nil {
 						continue
@@ -565,33 +580,36 @@ func mergeHooks(path string, ours map[string]any, remove, dropLegacy bool) (back
 	return backup, dropped, err
 }
 
-// mentionsLegacy says whether a config entry belongs to 旧记忆库.
-func mentionsLegacy(v any) bool {
+// mentionsTool says whether a config entry matches pattern.
+func mentionsTool(v any, pattern string) bool {
+	if pattern == "" {
+		return false
+	}
 	b, _ := json.Marshal(v)
 	s := strings.ToLower(string(b))
-	return strings.Contains(s, "old-mem")
+	return strings.Contains(s, pattern)
 }
 
-// withoutLegacy takes 旧记忆库's hooks out of one hook group. It returns nil
+// withoutTool takes matching hooks out of one hook group. It returns nil
 // when nothing is left in the group, and how many hooks it took out.
-func withoutLegacy(g any) (any, int) {
+func withoutTool(g any, pattern string) (any, int) {
 	m, ok := g.(map[string]any)
 	if !ok {
-		if mentionsLegacy(g) {
+		if mentionsTool(g, pattern) {
 			return nil, 1
 		}
 		return g, 0
 	}
 	list, ok := m["hooks"].([]any)
 	if !ok {
-		if _, isCmd := m["command"]; isCmd && mentionsLegacy(m) {
+		if _, isCmd := m["command"]; isCmd && mentionsTool(m, pattern) {
 			return nil, 1
 		}
 		return g, 0
 	}
 	var kept []any
 	for _, h := range list {
-		if !mentionsLegacy(h) {
+		if !mentionsTool(h, pattern) {
 			kept = append(kept, h)
 		}
 	}

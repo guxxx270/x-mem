@@ -1,0 +1,57 @@
+#!/bin/sh
+# x-mem plugin launcher (Claude Code, Codex, Antigravity).
+#
+# The plugin carries x-mem for each platform, compressed, in libexec/. The
+# first run puts the one for this machine at ~/.x-mem/bin/x-mem, which every
+# app, the command line and the capture job then share; a newer plugin
+# replaces it, an older one never does. Then it runs it.
+dir=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P) || exit 0
+
+case "$(uname -s 2>/dev/null)" in
+  Darwin) os=darwin; exe= ;;
+  Linux) os=linux; exe= ;;
+  MINGW*|MSYS*|CYGWIN*) os=windows; exe=.exe ;;
+  *) os=unknown; exe= ;;
+esac
+case "$(uname -m 2>/dev/null)" in
+  x86_64|amd64) arch=amd64 ;;
+  arm64|aarch64) arch=arm64 ;;
+  *) arch=unknown ;;
+esac
+
+home="${X_MEM_HOME:-$HOME/.x-mem}"
+dst="$home/bin/x-mem$exe"
+want=$(cat "$dir/libexec/VERSION" 2>/dev/null)
+have=$(cat "$home/bin/.version" 2>/dev/null)
+
+newer() { # is $1 a newer version than $2?
+  awk -v a="$1" -v b="$2" 'BEGIN { n = split(a, x, "."); m = split(b, y, ".");
+    for (i = 1; i <= (n > m ? n : m); i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 }
+    exit 1 }'
+}
+
+if [ ! -x "$dst" ] || { [ -n "$want" ] && [ "$want" != "$have" ] && newer "$want" "${have:-0}"; }; then
+  src="$dir/libexec/x-mem-$os-$arch$exe.gz"
+  if [ -f "$src" ]; then
+    mkdir -p "$home/bin" && tmp="$dst.$$.tmp" &&
+      gzip -dc "$src" > "$tmp" && chmod 755 "$tmp" && mv -f "$tmp" "$dst" &&
+      printf '%s\n' "$want" > "$home/bin/.version"
+    rm -f "$tmp" 2>/dev/null
+  fi
+fi
+
+if [ ! -x "$dst" ]; then
+  # No program for this machine: hooks stay out of the way, commands say why.
+  if [ "$1" = hook ]; then
+    case " $* " in *" antigravity "*) [ "$2" = guard ] && echo '{"decision":"allow"}' || echo '{}' ;; esac
+    exit 0
+  fi
+  echo "x-mem: 这个插件里没有 $os/$arch 的程序" >&2
+  exit 1
+fi
+
+# Codex runs the same hooks file as Claude Code and says so with PLUGIN_ROOT.
+if [ "$1" = hook ] && [ -n "$PLUGIN_ROOT" ]; then
+  case " $* " in *" --client "*) ;; *) set -- "$@" --client codex ;; esac
+fi
+exec "$dst" "$@"

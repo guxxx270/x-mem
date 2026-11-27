@@ -26,6 +26,9 @@ func TestHostsCodexThenAntigravityNeverClaude(t *testing.T) {
 	bin := t.TempDir()
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", t.TempDir())
+	was := systemHostDirs
+	systemHostDirs = func(_, home string) []string { return []string{filepath.Join(home, ".local/bin")} }
+	t.Cleanup(func() { systemHostDirs = was })
 	fakeBin(t, bin, "claude", "echo nope")
 	if _, _, _, ok := ResolveHost(nil); ok {
 		t.Fatal("with only claude installed, nothing is picked by default")

@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestDropLegacyHooks(t *testing.T) {
+func TestDropMatchingHooks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hooks.json")
 	before := `{"hooks": {
   "SessionStart": [
@@ -26,17 +26,17 @@ func TestDropLegacyHooks(t *testing.T) {
 }, "other": 1}`
 	os.WriteFile(path, []byte(before), 0o644)
 	ours := map[string]any{"SessionStart": map[string]any{"hooks": []any{map[string]any{"command": "/new/x-mem hook start --client codex"}}}}
-	_, dropped, err := mergeHooks(path, ours, false, true)
+	_, dropped, err := mergeHooks(path, ours, false, "old-mem")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if dropped != 3 {
-		t.Fatalf("dropped %d 旧记忆库 hooks, want 3", dropped)
+		t.Fatalf("dropped %d old-mem hooks, want 3", dropped)
 	}
 	raw, _ := os.ReadFile(path)
 	s := string(raw)
 	if strings.Contains(strings.ToLower(s), "old-mem") {
-		t.Fatalf("旧记忆库 left behind:\n%s", s)
+		t.Fatalf("old-mem left behind:\n%s", s)
 	}
 	var got struct {
 		Hooks map[string][]struct {
@@ -61,16 +61,16 @@ func TestDropLegacyHooks(t *testing.T) {
 		t.Fatalf("SessionStart should keep the other tool first and x-mem's new hook: %s", s)
 	}
 	if st := got.Hooks["Stop"]; len(st) != 1 || len(st[0].Hooks) != 1 || st[0].Hooks[0].Command != "OtherTool" {
-		t.Fatalf("another tool sharing a group with 旧记忆库 stays: %s", s)
+		t.Fatalf("another tool sharing a group with old-mem stays: %s", s)
 	}
 
-	// Without --drop nothing of 旧记忆库's is touched.
+	// Without --drop nothing of other tools is touched.
 	os.WriteFile(path, []byte(before), 0o644)
-	if _, dropped, _ := mergeHooks(path, ours, false, false); dropped != 0 {
+	if _, dropped, _ := mergeHooks(path, ours, false, ""); dropped != 0 {
 		t.Fatalf("dropped %d without the flag", dropped)
 	}
 	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), "old-mem") {
-		t.Fatal("旧记忆库's hooks must stay without the flag")
+		t.Fatal("existing hooks must stay without --drop")
 	}
 }
 
@@ -95,7 +95,7 @@ args = ["mcp"]
 [features]
 hooks = true
 `
-	got := codexMatchingServers(toml)
+	got := codexMatchingServers(toml, "old-mem")
 	want := []string{"old-mem", "kb-old"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)

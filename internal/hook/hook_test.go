@@ -87,8 +87,8 @@ func TestOptOut(t *testing.T) {
 	if out := runHook(t, "prompt", "s4", "订单服务用什么数据库", proj); out != "" {
 		t.Fatalf("the rest of an opted-out session stays silent, got %s", out)
 	}
-	if _, err := os.Stat(filepath.Join(home, "state", "recalled.jsonl")); err == nil {
-		data, _ := os.ReadFile(filepath.Join(home, "state", "recalled.jsonl"))
+	if _, err := os.Stat(filepath.Join(home, "state", "usage.jsonl")); err == nil {
+		data, _ := os.ReadFile(filepath.Join(home, "state", "usage.jsonl"))
 		if strings.Contains(string(data), "s4") {
 			t.Fatal("an opted-out session must not be logged")
 		}
@@ -98,7 +98,7 @@ func TestOptOut(t *testing.T) {
 func TestRecallLogHoldsNoMessageText(t *testing.T) {
 	home, proj := setup(t)
 	runHook(t, "prompt", "s5", "订单服务用什么数据库", proj)
-	data, err := os.ReadFile(filepath.Join(home, "state", "recalled.jsonl"))
+	data, err := os.ReadFile(filepath.Join(home, "state", "usage.jsonl"))
 	if err != nil || !strings.Contains(string(data), `"db"`) || strings.Contains(string(data), "订单服务用什么") {
 		t.Fatalf("log must hold ids, not the message: %s", data)
 	}
@@ -139,5 +139,31 @@ func TestStartMentionsInbox(t *testing.T) {
 	os.WriteFile(filepath.Join(home, "state", "inbox", "p-1.json"), []byte(`{"id":"p-1","status":"review","title":"t","text":"x"}`), 0o600)
 	if out := context(t, runHook(t, "start", "s2", "", proj)); !strings.Contains(out, "收件箱里有 1 条") {
 		t.Fatalf("start should mention the waiting proposal: %s", out)
+	}
+}
+
+func TestSessionStartListsSkills(t *testing.T) {
+	home, proj := setup(t)
+	p := filepath.Join(home, "personal/skills/release.md")
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	os.WriteFile(p, []byte("---\nid: S1\ntitle: 发版流程\ntype: skill\nwhen: \"要发版或发版出问题时\"\nsources: [L1, L2]\n---\n1. 先跑 make check\n2. 失败就 revert\n"), 0o644)
+	ctx := context(t, runHook(t, "start", "s9", "", proj))
+	if !strings.Contains(ctx, "你的技能") || !strings.Contains(ctx, "发版流程〔S1〕：要发版或发版出问题时") {
+		t.Fatalf("skill listed with id and when:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "make check") {
+		t.Fatal("only the name and when are listed; the steps are read on demand")
+	}
+	if strings.Count(ctx, "发版流程") != 1 {
+		t.Fatalf("a skill is not in the catalog as well:\n%s", ctx)
+	}
+}
+
+func TestUsageIsRecorded(t *testing.T) {
+	home, proj := setup(t)
+	runHook(t, "prompt", "s10", "订单服务用什么数据库", proj)
+	data, _ := os.ReadFile(filepath.Join(home, "state", "usage.jsonl"))
+	if !strings.Contains(string(data), `"id":"db"`) || !strings.Contains(string(data), `"via":"prompt"`) {
+		t.Fatalf("usage: %s", data)
 	}
 }

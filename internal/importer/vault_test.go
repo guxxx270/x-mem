@@ -35,7 +35,7 @@ status: active
 
 func TestVaultImport(t *testing.T) {
 	v := t.TempDir()
-	write(t, v, "Agent第二大脑.md", "# 入口\n")
+	write(t, v, "知识库总览.md", "# 入口\n")
 	write(t, v, "02 经验与方法/Agent/用户偏好与工作约束.md", prefs)
 	write(t, v, "02 经验与方法/Agent/镜像.md", "---\ntitle: 国内网络镜像\nhow: \"pip 走清华源\"\n---\n# 国内网络镜像\n\n- pip 用清华源\n")
 	write(t, v, "02 经验与方法/从 Codex 导入/01_x.md", "---\ntitle: \"Codex经验：nginx\"\nsource: codex-memory\n---\n# Codex经验：nginx\n\nport conflict\n")
@@ -48,7 +48,7 @@ func TestVaultImport(t *testing.T) {
 		"C01|nginx;HTTP 200;前端服务端口冲突排查|02 经验与方法/从 Codex 导入/01_x.md|x",
 	}, "\n"))
 
-	p, err := 旧记忆库(v)
+	p, err := Vault(v)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestVaultImport(t *testing.T) {
 	for _, s := range p.Skipped {
 		reasons[s.From] = true
 	}
-	for _, want := range []string{"Agent第二大脑.md", "02 经验与方法/准经验/准经验入口.md", "05 时间日志/2026-11/25｜某天.md"} {
+	for _, want := range []string{"知识库总览.md", "02 经验与方法/准经验/准经验入口.md", "05 时间日志/2026-11/25｜某天.md"} {
 		if !reasons[want] {
 			t.Errorf("%s should be skipped", want)
 		}

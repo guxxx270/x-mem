@@ -17,11 +17,12 @@ import (
 	"x-mem/internal/index"
 	"x-mem/internal/inject"
 	"x-mem/internal/recall"
+	"x-mem/internal/usage"
 	"x-mem/internal/writer"
 )
 
 // Version is reported to clients.
-var Version = "0.5.1"
+var Version = "0.6.0"
 
 // Instructions are sent to every client when it connects (Claude's desktop
 // app shows server instructions to the model; it has no hooks and no
@@ -93,7 +94,7 @@ var tools = []map[string]any{
 			"properties": map[string]any{
 				"text":        map[string]any{"type": "string", "description": "要记的内容，一条只写一件事，用陈述句"},
 				"quote":       map[string]any{"type": "string", "description": "用户的原话，逐字摘自本次会话"},
-				"kind":        map[string]any{"type": "string", "enum": writer.Kinds, "description": "decision 决定 / rule 规则 / preference 偏好 / fact 事实 / lesson 教训 / howto 做法"},
+				"kind":        map[string]any{"type": "string", "enum": writer.Kinds, "description": "decision 决定 / rule 规则 / preference 偏好 / fact 事实 / lesson 教训 / howto 做法 / skill 技能（用户要把一套做法存成技能时；text 写成编号步骤，when 写什么情形下用）"},
 				"title":       map[string]any{"type": "string", "description": "短标题，可省略"},
 				"scope":       map[string]any{"type": "string", "enum": []string{"personal", "project"}, "description": "默认：规则和偏好进个人层，其他进当前项目层"},
 				"supersedes":  map[string]any{"type": "string", "description": "被纠正的旧笔记 id"},
@@ -102,6 +103,7 @@ var tools = []map[string]any{
 				"aliases":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "用户会怎么称呼这件事"},
 				"triggers":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "仅规则：在哪些动作前提醒，如 Bash(git push*)"},
 				"enforcement": map[string]any{"type": "string", "enum": []string{"advise", "block"}, "description": "仅规则：advise 提醒，block 拦下"},
+				"when":        map[string]any{"type": "string", "description": "仅技能：什么情形下用，一句话"},
 				"workspace":   workspaceProp,
 			},
 			"required": []string{"text", "quote"},
@@ -245,11 +247,21 @@ func call(name string, args map[string]any) (string, bool) {
 			return "query 不能为空", true
 		}
 		res := recall.Search(ix, q, recall.Options{Scope: str(args, "scope"), Limit: 5, Now: time.Now()})
+		var used []string
+		for i, h := range res.Hits {
+			if i < 3 && h.Doc.Layer != "kb" {
+				used = append(used, h.Doc.ID)
+			}
+		}
+		usage.Record(l, "recall", time.Now(), used...)
 		return inject.Answer(res, 3), false
 	case "read":
 		d := ix.Lookup(str(args, "id"))
 		if d == nil {
 			return fmt.Sprintf("找不到笔记 %q", str(args, "id")), true
+		}
+		if d.Layer != "kb" {
+			usage.Record(l, "read", time.Now(), d.ID)
 		}
 		return Describe(ix, d), false
 	case "status":
@@ -265,6 +277,7 @@ func propose(l config.Layers, args map[string]any) (string, bool) {
 		Title: str(args, "title"), Scope: str(args, "scope"),
 		Supersedes: str(args, "supersedes"), Line: str(args, "line"), Relation: str(args, "relation"),
 		Aliases: list(args, "aliases"), Triggers: list(args, "triggers"), Enforcement: str(args, "enforcement"),
+		When: str(args, "when"),
 	}
 	got, err := writer.New(l).Submit(p)
 	if got == nil {
@@ -286,7 +299,7 @@ func inbox(l config.Layers, args map[string]any) (string, bool) {
 		}
 		fmt.Fprintf(&b, "%d 条提案等用户确认：\n", len(ps))
 		for _, p := range ps {
-			fmt.Fprintf(&b, "\n%s [%s] %s\n  %s\n", p.ID, p.Kind, p.Title, p.Text)
+			fmt.Fprintf(&b, "\n%s [%s] %s\n  %s\n", p.ID, p.Kind, p.Title, strings.ReplaceAll(p.Shown(), "\n", "\n  "))
 			if p.Quote != "" {
 				fmt.Fprintf(&b, "  原话：%s\n", p.Quote)
 			}
@@ -363,6 +376,14 @@ func Describe(ix *index.Index, d *index.Doc) string {
 	}
 	if len(n.Triggers) > 0 {
 		b.WriteString("触发条件：" + strings.Join(n.Triggers, "、") + "\n")
+	}
+	if n.When != "" {
+		b.WriteString("适用：" + n.When + "\n")
+	}
+	for _, s := range n.Sources {
+		if t := ix.Lookup(s); t != nil {
+			fmt.Fprintf(&b, "来自经验：%s（%s）\n", t.Title, t.ID)
+		}
 	}
 	for _, r := range n.Relations {
 		target := r.Target

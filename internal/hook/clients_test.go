@@ -100,3 +100,19 @@ func TestCodexHooks(t *testing.T) {
 		t.Fatalf("codex Bash git push: %s", out)
 	}
 }
+
+func TestCodexIsRecognisedWithoutTheFlag(t *testing.T) {
+	_, proj := setup(t)
+	data, _ := json.Marshal(map[string]any{"session_id": "s", "turn_id": "t1", "cwd": proj, "tool_name": "apply_patch",
+		"tool_input": map[string]any{"command": "*** Begin Patch\n*** Update File: a.sql\n*** End Patch"}})
+	// Through the plugin's shared hooks file Codex calls the hook as Claude Code would.
+	out := RunAs(Claude, "guard", strings.NewReader(string(data)), time.Now())
+	if strings.Contains(out, "推送") {
+		t.Fatalf("an apply_patch is an Edit, not a push: %s", out)
+	}
+	var in Input
+	json.Unmarshal(data, &in)
+	if in.TurnID != "t1" {
+		t.Fatal("turn id not read")
+	}
+}

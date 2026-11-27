@@ -22,7 +22,9 @@ import (
 	"x-mem/internal/index"
 	"x-mem/internal/inject"
 	"x-mem/internal/recall"
+	"x-mem/internal/skills"
 	"x-mem/internal/textutil"
+	"x-mem/internal/usage"
 	"x-mem/internal/writer"
 )
 
@@ -47,6 +49,7 @@ type Input struct {
 	TranscriptPath string          `json:"transcript_path"`
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
+	TurnID         string          `json:"turn_id"` // only Codex sends it
 	Client         string          `json:"-"`
 }
 
@@ -85,6 +88,11 @@ func RunAs(client, event string, stdin io.Reader, now time.Time) string {
 		in = fromAntigravity(data)
 	} else {
 		_ = json.Unmarshal(data, &in)
+		// One hooks file serves Claude Code and Codex in the plugin: Codex
+		// says who it is by sending a turn id (and by PLUGIN_ROOT).
+		if client == Claude && (in.TurnID != "" || in.ToolName == "apply_patch") {
+			client = Codex
+		}
 	}
 	in.Client = client
 	if in.Client == Codex {
@@ -149,7 +157,7 @@ func start(in Input, l config.Layers, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var rules, recent []*index.Doc
+	var rules, skills, recent []*index.Doc
 	cutoff := now.AddDate(0, 0, -30).Format("2006-01-02")
 	var others []*index.Doc
 	for _, d := range ix.Docs {
@@ -157,6 +165,8 @@ func start(in Input, l config.Layers, now time.Time) (string, error) {
 			continue
 		}
 		switch {
+		case d.Type == "skill":
+			skills = append(skills, d)
 		case d.IsRule():
 			rules = append(rules, d)
 		case d.Layer == "project" && d.Type == "decision" && d.Updated >= cutoff:
@@ -166,8 +176,24 @@ func start(in Input, l config.Layers, now time.Time) (string, error) {
 		}
 	}
 	pending := len(writer.NewInbox(l.State).List(writer.Review))
-	if len(rules) == 0 && len(recent) == 0 && len(others) == 0 && pending == 0 {
+	if len(rules) == 0 && len(skills) == 0 && len(recent) == 0 && len(others) == 0 && pending == 0 {
 		return "", nil
+	}
+	if len(skills) > 1 {
+		// The skills used most in the last two months come first.
+		used := usage.Since(l, now.AddDate(0, 0, -60))
+		times := func(d *index.Doc) int {
+			if u := used[d.ID]; u != nil {
+				return u.Times
+			}
+			return 0
+		}
+		sort.SliceStable(skills, func(i, j int) bool {
+			if a, b := times(skills[i]), times(skills[j]); a != b {
+				return a > b
+			}
+			return skills[i].Updated > skills[j].Updated
+		})
 	}
 	sort.SliceStable(rules, func(i, j int) bool { return rules[i].Layer > rules[j].Layer })
 	sort.SliceStable(recent, func(i, j int) bool { return recent[i].Updated > recent[j].Updated })
@@ -180,8 +206,8 @@ func start(in Input, l config.Layers, now time.Time) (string, error) {
 		return others[i].Updated > others[j].Updated
 	})
 	block := ""
-	if len(rules)+len(recent)+len(others) > 0 {
-		block = inject.StartBlock(rules, recent, others, StartBudget)
+	if len(rules)+len(skills)+len(recent)+len(others) > 0 {
+		block = inject.StartBlock(rules, skills, recent, others, StartBudget)
 	}
 	if pending > 0 {
 		block = strings.TrimSpace(block + fmt.Sprintf("\n\nx-mem 收件箱里有 %d 条记忆提案等用户确认。合适的时候提一句（用户可以说“过一下收件箱”），不要替他确认。", pending))
@@ -240,7 +266,7 @@ func prompt(in Input, l config.Layers, now time.Time) (string, error) {
 		ids = append(ids, h.Doc.ID)
 	}
 	_ = saveSession(l, in.SessionID, st)
-	logRecall(l, in.SessionID, ids, now)
+	usage.Record(l, "prompt", now, ids...)
 	return reply("UserPromptSubmit", block), nil
 }
 
@@ -291,6 +317,9 @@ func guardHook(in Input, l config.Layers) (string, error) {
 			}
 		}
 	}
+	for _, d := range append(append([]*index.Doc{}, block...), advise...) {
+		usage.Record(l, "guard", time.Now(), d.ID)
+	}
 	if len(block) > 0 {
 		text := inject.GuardBlock("这个动作被用户的规则拦下了：", append(block, advise...), GuardBudget)
 		return guardReply("deny", text), nil
@@ -337,6 +366,13 @@ func guardReply(decision, text string) string {
 // costs the same however long the session is.
 func stop(in Input, l config.Layers, now time.Time) (string, error) {
 	if !capture.LoadState(l).Enabled || in.TranscriptPath == "" {
+		// Skills can be on without capture: then the end of a turn is what
+		// starts their once-a-day run.
+		if st := skills.Load(l); st.Mode == "on" && now.Sub(st.LastRun) >= skills.Every && os.Getenv("X_MEM_NO_SPAWN") == "" {
+			if exe, err := os.Executable(); err == nil {
+				spawnDetached(exe, "writer", "--once")
+			}
+		}
 		return "", nil
 	}
 	if err := capture.AddSignal(l, capture.Signal{Path: in.TranscriptPath, Session: in.SessionID, Cwd: in.Cwd, At: now}); err != nil {
@@ -399,11 +435,6 @@ func saveSession(l config.Layers, id string, st session) error {
 
 // IsOptedOut reports whether a session was marked #不记.
 func IsOptedOut(l config.Layers, id string) bool { return loadSession(l, id).OptOut }
-
-func logRecall(l config.Layers, sessionID string, ids []string, now time.Time) {
-	rec, _ := json.Marshal(map[string]any{"t": now.Format(time.RFC3339), "event": "prompt", "session": sessionID, "ids": ids})
-	appendLine(filepath.Join(l.State, "recalled.jsonl"), string(rec))
-}
 
 func logErr(l config.Layers, event string, err error) {
 	appendLine(filepath.Join(l.State, "hook.log"), time.Now().Format(time.RFC3339)+" "+event+": "+err.Error())

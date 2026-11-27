@@ -30,7 +30,7 @@ type Proposal struct {
 	ID      string    `json:"id"`
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
-	Source  string    `json:"source"` // mcp, cli, capture
+	Source  string    `json:"source"` // mcp, cli, capture, skills
 
 	Kind    string `json:"kind"`
 	Scope   string `json:"scope,omitempty"`   // personal or project
@@ -49,6 +49,8 @@ type Proposal struct {
 	Triggers    []string `json:"triggers,omitempty"`
 	Enforcement string   `json:"enforcement,omitempty"`
 	Sensitivity string   `json:"sensitivity,omitempty"`
+	When        string   `json:"when,omitempty"`    // skill: the situation it is for
+	Sources     []string `json:"sources,omitempty"` // skill: the notes it grew from
 
 	Status     string   `json:"status"`
 	Problems   []string `json:"problems,omitempty"`
@@ -60,6 +62,15 @@ type Proposal struct {
 	Note       string   `json:"note,omitempty"` // the file written
 
 	quoteFound bool // the quote was already found in a session file
+}
+
+// Shown is the proposal's text as you review it: a skill starts with when
+// it is for.
+func (p *Proposal) Shown() string {
+	if p.Kind == "skill" && p.When != "" {
+		return "适用：" + p.When + "\n" + p.Text
+	}
+	return p.Text
 }
 
 // Inbox is where proposals wait. It lives in the state folder, never in git.
@@ -134,8 +145,7 @@ func (in Inbox) List(states ...string) []*Proposal {
 }
 
 // RunID is a time plus four random characters, so two writes in the same
-// second never share one (旧记忆库's ids stopped at the second, and undoing
-// one write undid the other).
+// second never share one.
 func RunID(now time.Time) string {
 	return now.Format("20060102T150405") + "-" + randomChars(4, "0123456789abcdefghijklmnopqrstuvwxyz")
 }

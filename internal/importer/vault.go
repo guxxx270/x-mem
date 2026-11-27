@@ -1,14 +1,14 @@
-// Package importer turns another memory tool's store into x-mem notes.
+// Package importer turns an existing Obsidian knowledge vault into x-mem notes.
 //
-// 旧记忆库 keeps memory in an Obsidian vault. Pages there hold several facts
-// each, and an alias table (90 系统文件/canonical_sources.psv) maps phrases to
-// pages. The import keeps the vault untouched and writes new files only:
+// Pages in a structured Obsidian vault often hold several facts each, with an
+// optional alias table (90 系统文件/canonical_sources.psv) mapping phrases to
+// pages. The import leaves the source vault untouched and writes new files:
 //
-//   - the user-preference page is split, one rule per bullet, into rules/;
+//   - user-preference pages are split, one rule per bullet, into rules/imported/;
 //   - every other page under 01 项目, 02 经验与方法, 03 资料与证据 and
-//     04 已完成与复盘 becomes one note under notes/imported/, same path;
-//   - time logs, session excerpts and 旧记忆库's own system pages are skipped,
-//     and so are index pages and pages still equal to 旧记忆库's samples.
+//     04 已完成与复盘 becomes one note under notes/imported/, keeping its path;
+//   - time logs, session excerpts and system pages are skipped, and so are
+//     index pages and pages still equal to starter templates.
 package importer
 
 import (
@@ -57,15 +57,15 @@ type Plan struct {
 var memoryZones = []string{"01 项目", "02 经验与方法", "03 资料与证据", "04 已完成与复盘"}
 
 var skipZones = map[string]string{
-	"05 时间日志": "时间日志和会话摘录是原始记录，不当记忆导入（原库里照样能查）",
-	"90 系统文件": "旧记忆库 自己的系统文件",
+	"05 时间日志": "时间日志和会话摘录是原始记录，不当记忆导入（登记知识库后照样能查）",
+	"90 系统文件": "原库的系统维护文件",
 }
 
-// 旧记忆库 reads a 旧记忆库 vault and plans the import.
-func 旧记忆库(vault string) (*Plan, error) {
+// Vault reads an Obsidian vault and plans the import.
+func Vault(vault string) (*Plan, error) {
 	st, err := os.Stat(vault)
 	if err != nil || !st.IsDir() {
-		return nil, fmt.Errorf("找不到 旧记忆库 库：%s", vault)
+		return nil, fmt.Errorf("找不到笔记库目录：%s", vault)
 	}
 	p := &Plan{Vault: vault}
 	aliases := readAliasTable(filepath.Join(vault, "90 系统文件", "canonical_sources.psv"))
@@ -98,7 +98,7 @@ func 旧记忆库(vault string) (*Plan, error) {
 			return nil
 		}
 		if !contains(memoryZones, zone) {
-			p.Skipped = append(p.Skipped, Skipped{rel, "不在 旧记忆库 的记忆分区里"})
+			p.Skipped = append(p.Skipped, Skipped{rel, "不在记忆分区里"})
 			return nil
 		}
 		src, err := os.ReadFile(abs)
@@ -108,7 +108,7 @@ func 旧记忆库(vault string) (*Plan, error) {
 		}
 		sum := sha256.Sum256(src)
 		if templateHashes[hex.EncodeToString(sum[:])] {
-			p.Skipped = append(p.Skipped, Skipped{rel, "还是 旧记忆库 自带的示例页，没改过"})
+			p.Skipped = append(p.Skipped, Skipped{rel, "未修改过的模板示例页"})
 			return nil
 		}
 		stem := strings.TrimSuffix(name, filepath.Ext(name))
@@ -129,7 +129,7 @@ func 旧记忆库(vault string) (*Plan, error) {
 		}
 		n := Planned{
 			From:    rel,
-			ID:      unique(ids, "kr-"+slug(stem)),
+			ID:      unique(ids, "imp-"+slug(stem)),
 			Title:   page.title,
 			Type:    pageType(page, zone),
 			Aliases: pageAliases(page, aliases[rel]),
@@ -217,8 +217,8 @@ func pageType(pg page, zone string) string {
 	return "fact"
 }
 
-// status maps 旧记忆库's states onto x-mem's. 旧记忆库's "provisional" pages
-// may be cited but not enforced, which is what an active non-rule note is.
+// status maps vault page states onto x-mem's. Provisional pages may be cited
+// but not enforced as rules, which matches an active non-rule note.
 func status(s string) string {
 	switch s {
 	case "superseded", "deprecated":
@@ -227,7 +227,7 @@ func status(s string) string {
 	return "active"
 }
 
-// aliasRow is one line of 旧记忆库's alias table.
+// aliasRow is one line of an optional PSV alias table.
 type aliasRow struct {
 	aliases []string
 	anchor  string
@@ -266,11 +266,10 @@ func readAliasTable(path string) map[string][]aliasRow {
 	return out
 }
 
-// pageAliases merges the alias table rows and 旧记忆库's question triggers.
-// Pages 旧记忆库 distilled from Codex sessions got machine-made alias lists
-// (file names, error codes, "HTTP 200"); as direct-hit phrases those fire on
-// unrelated questions, so only their longer Chinese aliases (five characters or more) are kept. The
-// body still carries every keyword for ordinary search.
+// pageAliases merges alias table rows and frontmatter triggers. Pages
+// distilled automatically from sessions carry noisy short tokens (file names,
+// error codes, "HTTP 200"); only longer Chinese aliases (five characters or
+// more) are kept as direct-hit phrases.
 func pageAliases(pg page, rows []aliasRow) []string {
 	var out []string
 	for _, r := range rows {
@@ -318,7 +317,7 @@ func splitPreferences(pg page, rows []aliasRow) []Planned {
 	}
 	var out []Planned
 	add := func(title, body string) {
-		n := Planned{From: pg.rel, ID: fmt.Sprintf("kr-pref-%d", len(out)+1), Title: title, Type: "preference"}
+		n := Planned{From: pg.rel, ID: fmt.Sprintf("imp-pref-%d", len(out)+1), Title: title, Type: "preference"}
 		text := norm(title + body)
 		for _, r := range rows {
 			if r.anchor == "" || !strings.Contains(text, norm(r.anchor)) {

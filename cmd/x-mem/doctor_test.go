@@ -5,13 +5,13 @@ import (
 	"testing"
 )
 
-// A hooks.json shaped like a real one: another tool's hook and 旧记忆库's sit
+// A hooks.json shaped like a real one: two other tools' hooks sit
 // before x-mem's in each event, so x-mem's hooks are at group 1 or 2.
 const codexHooks = `{"hooks": {
   "PreToolUse": [{"hooks": [{"command": "/Users/u/.x-mem/bin/x-mem hook guard --client codex", "type": "command"}]}],
   "SessionStart": [
     {"hooks": [{"command": "OtherTool"}], "matcher": "startup|resume"},
-    {"hooks": [{"command": "python3 old-mem/session_hook.py start"}]},
+    {"hooks": [{"command": "python3 legacy-tool/session_hook.py start"}]},
     {"hooks": [{"command": "/Users/u/.x-mem/bin/x-mem hook start --client codex"}]}
   ],
   "Stop": [
@@ -62,5 +62,32 @@ trusted_hash = "sha256:ff"
 	// A Codex that keeps no trust records: nothing to report.
 	if got := codexUntrusted(path, codexHooks, "[features]\nhooks = true\n"); got != nil {
 		t.Fatalf("no trust records, reported %v", got)
+	}
+}
+
+func TestNewerVersion(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{{"0.6.0", "0.5.1", true}, {"0.5.1", "0.6.0", false}, {"0.10.0", "0.9.9", true}, {"1.0", "1.0.0", false}, {"0.6.0", "", true}} {
+		if got := newerVersion(c.a, c.b); got != c.want {
+			t.Errorf("newer(%s, %s) = %v", c.a, c.b, got)
+		}
+	}
+}
+
+func TestCodexPluginEnabled(t *testing.T) {
+	cases := map[string]bool{
+		"": false,
+		"[plugins.\"x-mem@x-mem\"]\nenabled = true\n":                   true,
+		"[plugins.\"x-mem@team\"]\n":                                    true,
+		"[plugins.\"x-mem@x-mem\"]\nenabled = false\n[mcp_servers.x]\n": false,
+		"[plugins.\"gmail@openai-curated\"]\nenabled = true\n":          false,
+		"[plugins.\"x-mem@x-mem\"]\n[other]\nenabled = false\n":         true,
+	}
+	for toml, want := range cases {
+		if got := codexPluginEnabled(toml); got != want {
+			t.Errorf("%q: got %v", toml, got)
+		}
 	}
 }

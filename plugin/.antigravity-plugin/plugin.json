@@ -1,0 +1,17 @@
+{
+  "author": {
+    "name": "Jerry Gu"
+  },
+  "description": "本地记忆：你定过的事、规则和偏好，Claude Code、Codex、Antigravity 共用一份；回答带出处，记忆里没有就直说没有。",
+  "displayName": "x-mem",
+  "keywords": [
+    "memory",
+    "markdown",
+    "decisions",
+    "chinese"
+  ],
+  "license": "MIT",
+  "name": "x-mem",
+  "repository": "https://github.com/guxxx270/x-mem",
+  "version": "0.6.0"
+}

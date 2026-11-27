@@ -1,0 +1,37 @@
+{
+  "x-mem": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "sh ./bin/x-mem hook start --client antigravity",
+        "timeout": 10
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "sh ./bin/x-mem hook prompt --client antigravity",
+        "timeout": 10
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh ./bin/x-mem hook guard --client antigravity",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "sh ./bin/x-mem hook stop --client antigravity",
+        "timeout": 10
+      }
+    ]
+  }
+}
