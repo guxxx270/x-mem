@@ -59,12 +59,25 @@ func TestAntigravityHooks(t *testing.T) {
 	if o["decision"] != "deny" || !strings.Contains(o["reason"].(string), "推送到 main 之前先跑全量测试") {
 		t.Fatalf("first push should be stopped once with the rule: %v", o)
 	}
-	if o := agRun(t, "guard", push); len(o) != 0 {
+	// PreToolUse must always carry a decision: Antigravity reads {} as a
+	// refusal with no reason and would stop every tool call.
+	if o := agRun(t, "guard", push); len(o) != 1 || o["decision"] != "allow" {
 		t.Fatalf("after the reminder the push goes through: %v", o)
 	}
 	ls := with(map[string]any{"toolCall": map[string]any{"name": "run_command", "args": map[string]any{"CommandLine": "ls"}}})
-	if o := agRun(t, "guard", ls); len(o) != 0 {
-		t.Fatalf("ls stays silent: %v", o)
+	if o := agRun(t, "guard", ls); len(o) != 1 || o["decision"] != "allow" {
+		t.Fatalf("ls is allowed: %v", o)
+	}
+	mcp := map[string]any{"conversationId": "c2", "workspacePaths": []string{}, "toolCall": map[string]any{"name": "mcp_x-mem_recall", "args": map[string]any{"query": "\"暗号\""}}}
+	if o := agRun(t, "guard", mcp); o["decision"] != "allow" {
+		t.Fatalf("a tool call with no workspace is allowed: %v", o)
+	}
+	t.Setenv("X_MEM_DISABLE", "1")
+	if o := agRun(t, "guard", ls); o["decision"] != "allow" {
+		t.Fatalf("x-mem's own runs allow every tool: %v", o)
+	}
+	if o := agRun(t, "start", base); len(o) != 0 {
+		t.Fatalf("other events stay quiet with {}: %v", o)
 	}
 }
 

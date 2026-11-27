@@ -434,6 +434,11 @@ func cmdDoctor() int {
 			}
 			fail("%s：%s → %s", c.name, strings.Join(what, "，"), c.fix)
 		}
+		if c.name == "Codex" && len(missing) < len(c.events) {
+			if untrusted := codexUntrusted(filepath.Join(codexDir(), "hooks.json"), c.hooks, c.mcp); len(untrusted) > 0 {
+				fail("Codex：x-mem 的钩子还没被信任（%s），Codex 不会运行它们 → 在 Codex 里输入 /hooks（App 里是 设置 → Hooks）逐个信任", strings.Join(untrusted, "、"))
+			}
+		}
 		if strings.Contains(strings.ToLower(c.hooks+c.mcp), "old-mem") {
 			note("%s 的配置里还有 旧记忆库 的条目；不用 旧记忆库 了就运行它的 uninstall.sh，或手动删掉", c.name)
 		}
@@ -463,6 +468,47 @@ func cmdDoctor() int {
 	}
 	fmt.Printf("\n发现 %d 个问题。\n", bad)
 	return 1
+}
+
+// codexUntrusted lists x-mem's hooks that Codex has not been told to trust.
+// Codex records trust in config.toml as [hooks.state."<hooks.json>:<event>:
+// <group>:<hook>"]; a hook without such an entry never runs. Older Codex
+// versions keep no trust records, so nothing is reported for them.
+func codexUntrusted(hooksPath, hooksJSON, configTOML string) []string {
+	if !strings.Contains(configTOML, "[hooks.state") {
+		return nil
+	}
+	var file struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if json.Unmarshal([]byte(hooksJSON), &file) != nil {
+		return nil
+	}
+	events := []struct{ name, key, label string }{
+		{"SessionStart", "session_start", "start"},
+		{"UserPromptSubmit", "user_prompt_submit", "prompt"},
+		{"PreToolUse", "pre_tool_use", "guard"},
+		{"Stop", "stop", "stop"},
+	}
+	var out []string
+	for _, ev := range events {
+		for gi, g := range file.Hooks[ev.name] {
+			for hi, h := range g.Hooks {
+				if !strings.Contains(h.Command, "x-mem hook "+ev.label) {
+					continue
+				}
+				key := fmt.Sprintf("[hooks.state.%q]", fmt.Sprintf("%s:%s:%d:%d", hooksPath, ev.key, gi, hi))
+				if !strings.Contains(configTOML, key) {
+					out = append(out, ev.name)
+				}
+			}
+		}
+	}
+	return out
 }
 
 func recentLogLines(path string, within time.Duration, max int) []string {

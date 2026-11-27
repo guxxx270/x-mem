@@ -76,7 +76,7 @@ const (
 // format; Antigravity's is translated on the way in and out.
 func RunAs(client, event string, stdin io.Reader, now time.Time) string {
 	if os.Getenv("X_MEM_DISABLE") != "" { // x-mem's own host runs
-		return quiet(client)
+		return quiet(client, event)
 	}
 	data, _ := io.ReadAll(io.LimitReader(stdin, 4<<20))
 	var in Input
@@ -100,22 +100,27 @@ func RunAs(client, event string, stdin io.Reader, now time.Time) string {
 	}
 	l, err := config.Resolve(cwd)
 	if err != nil {
-		return quiet(client)
+		return quiet(client, event)
 	}
 	out, err := run(event, in, l, now)
 	if err != nil {
 		logErr(l, client+" "+event, err)
-		return quiet(client)
+		return quiet(client, event)
 	}
 	if client == Antigravity {
-		return toAntigravity(out)
+		return toAntigravity(event, out)
 	}
 	return out
 }
 
-// quiet is the reply that changes nothing.
-func quiet(client string) string {
+// quiet is the reply that changes nothing. Antigravity's PreToolUse needs an
+// explicit decision: an empty object counts as a refusal with no reason, which
+// would stop every tool call.
+func quiet(client, event string) string {
 	if client == Antigravity {
+		if event == "guard" {
+			return agAllow
+		}
 		return "{}"
 	}
 	return ""

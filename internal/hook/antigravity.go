@@ -97,11 +97,18 @@ func canonicalTool(name string, args map[string]json.RawMessage) (string, json.R
 	return name, b
 }
 
+// agAllow lets an Antigravity tool call through to the next hook or the
+// default policy. PreToolUse must always say so: "decision" is required, and
+// {} is read as a refusal.
+const agAllow = `{"decision":"allow"}`
+
 // toAntigravity turns x-mem's Claude-format reply into Antigravity's:
-// context goes in injectSteps, a refusal is decision "deny" with a reason.
-func toAntigravity(out string) string {
-	if out == "" {
-		return "{}"
+// context goes in injectSteps, a refusal is decision "deny" with a reason,
+// and a tool call x-mem has nothing against is "allow".
+func toAntigravity(event, out string) string {
+	quietReply := "{}"
+	if event == "guard" {
+		quietReply = agAllow
 	}
 	var o struct {
 		H struct {
@@ -110,17 +117,22 @@ func toAntigravity(out string) string {
 			PermissionDecisionReason string `json:"permissionDecisionReason"`
 		} `json:"hookSpecificOutput"`
 	}
-	if json.Unmarshal([]byte(out), &o) != nil {
-		return "{}"
+	if out == "" || json.Unmarshal([]byte(out), &o) != nil {
+		return quietReply
 	}
-	var reply any = map[string]any{}
+	var reply any
 	switch {
 	case o.H.PermissionDecision == "deny":
 		reply = map[string]any{"decision": "deny", "reason": o.H.PermissionDecisionReason}
+	case event == "guard":
+		// PreToolUse cannot add context; anything short of a refusal is allow.
+		return agAllow
 	case o.H.AdditionalContext != "":
 		reply = map[string]any{"injectSteps": []any{
 			map[string]any{"systemMessage": map[string]any{"systemMessage": o.H.AdditionalContext}},
 		}}
+	default:
+		return quietReply
 	}
 	b, _ := json.Marshal(reply)
 	return string(b)
