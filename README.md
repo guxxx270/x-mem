@@ -2,7 +2,7 @@
 
 给编程 agent 用的本地记忆，**Claude Code、Codex、Antigravity、Claude 桌面版共用一份**。笔记就是普通的 Markdown 文件，分个人层和项目层；x-mem 负责把和当前问题**直接相关**的那一两条找出来交给 agent，记忆里没有的时候老实说没有；你说过的决定可以记下来、纠正、撤回；规则能在动作执行前提醒或拦下；Obsidian 库、放 Word/PDF/Excel 的资料文件夹可以登记成知识库，能查、带出处（PDF 带页码），但不算你定过的事。
 
-- 单个 Go 二进制，零外部依赖，不联网。x-mem 自己不调模型；需要提炼时借你已登录的 `claude`。
+- 单个 Go 二进制，零外部依赖，不联网。x-mem 自己不调模型；需要提炼时借你已登录的 Codex（默认）或 Antigravity 命令行。
 - Markdown 是唯一的真相来源。索引只是缓存，随时可以删；手改笔记后下一次查询自动生效。
 - 中文友好：中文按双字切词、英文做词干，再按“问题的要点被覆盖了多少”分成 direct / related / none 三档。钩子只注入 direct，其余一律不出声。
 
@@ -34,7 +34,7 @@ x-mem doctor                                 # 确认都接好了
 - **Codex** 只运行你信任过的钩子：装好后在 Codex 里信任一次（CLI 输入 `/hooks`；App 在 设置 → Hooks）。信任记录按钩子在 `hooks.json` 里的位置算，位置变了（比如删掉了排在前面的 旧记忆库 钩子）要重新信任。`x-mem doctor` 会指出哪几个还没信任。没信任时 MCP 仍然可用（Codex 会按 AGENTS.md 主动 recall），只是每条消息的自动想起和动作前规则不生效。
 - **Antigravity** 的 PreToolUse 必须回 `{"decision":"allow"}` 才放行，回 `{}` 等于拒绝；x-mem 0.4.1 起在没命中规则、出错、关闭时都明确回 allow（0.4.0 有这个问题，会拦下所有工具调用）。Antigravity 第一次调 x-mem 的 MCP 工具时会问你允不允许，选“always allow”以后就不问了。
 - 规则的触发条件三端通用：`Bash(git push*)` 在 Codex 里匹配它的 shell，在 Antigravity 里匹配 `run_command`；`Edit(*.sql)` 也匹配 Codex 的 `apply_patch` 和 Antigravity 的改文件工具。
-- 原话核对和会话采集读三家各自的会话文件（`~/.claude/projects`、`~/.codex/sessions`、`~/.gemini/antigravity*/brain`），自动跳过 `claude -p`、`codex exec` 这类无头运行。
+- 原话核对和会话采集读三家各自的会话文件（`~/.claude/projects`、`~/.codex/sessions`、`~/.gemini/antigravity*/brain`），自动跳过 `claude -p`、`codex exec`、`agy -p` 这类无头运行；x-mem 发给整理助手的提示带一个标记，那段会话永远不会被当成你说的话。
 
 ### 从 旧记忆库 换过来
 
@@ -126,6 +126,7 @@ x-mem undo 20261126T111110-psrm
 
 ```bash
 x-mem capture on [--exclude ~/某个项目]   # 打开；macOS 上同时装一个每 30 分钟的定时扫描
+x-mem capture host antigravity             # 改用 Antigravity 整理（默认 Codex）
 x-mem capture off
 ```
 
@@ -133,7 +134,7 @@ x-mem capture off
 
 - 工具输出、系统提示、粘贴的大段代码或日志跳过；`<private>…</private>` 里的话不读；消息里写了 `#不记` 的整个会话都不读，之前采到的候选也会撤掉。
 - 先用中文信号词（决定、以后、改成、一律、不要、别再、记住、约定、原因是、踩坑……）和英文信号词挑候选句，长度按字数算；“好的”“继续”“嗯”直接丢。
-- 候选交给你已登录的 `claude -p` 起一个不带工具的子任务提炼（x-mem 自己不调模型）；没有可用的 `claude` 时，原句直接进 inbox。
+- 候选交给一个整理助手提炼（x-mem 自己不调模型）：默认是你已登录的 **Codex**（`codex exec`，只读沙箱、低推理强度），也可以用 **Antigravity 命令行**（`agy -p`，需要单独安装并登录过一次；它在后台运行时不输出的已知问题，macOS 上用 `script` 给它一个终端绕过去）。Claude 只有你用 `x-mem capture host claude` 明确选了才会用。`capture on` 时记下程序的完整路径，定时任务也找得到。一个都没有时，原句直接进 inbox。
 - 采集来的提案**默认都等你确认**（`x-mem inbox`）；`config.json` 里 `"auto_apply_capture": true` 可以改成自动写入。
 
 ## 想起来：目录、直接依据、联想
@@ -182,7 +183,7 @@ x-mem kb remove <目录>
 {
   "commit_project": false,
   "auto_apply_capture": false,
-  "host": ["claude", "-p"],
+  "host": ["/opt/homebrew/bin/codex"],
   "quote_window_hours": 72,
   "kb": [{"path": "/Users/you/Documents/知识库", "exclude": ["01 项目", "02 经验与方法"]}]
 }

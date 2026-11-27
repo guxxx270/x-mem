@@ -21,7 +21,7 @@ import (
 )
 
 // Version is reported to clients.
-var Version = "0.5.0"
+var Version = "0.5.1"
 
 // Instructions are sent to every client when it connects (Claude's desktop
 // app shows server instructions to the model; it has no hooks and no

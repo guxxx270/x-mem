@@ -139,6 +139,9 @@ func ReadFrom(path string, offset int64) ([]Message, int64, error) {
 			if m.Session == "" && m.Role != "meta" {
 				m.Session = SessionOf(path)
 			}
+			if m.Role == "user" && strings.Contains(m.Text, HostMarker) {
+				m = Message{Role: "meta", Client: m.Client, Headless: true, Session: m.Session, Cwd: m.Cwd, Time: m.Time}
+			}
 			out = append(out, m)
 		}
 		if err != nil {
@@ -147,6 +150,10 @@ func ReadFrom(path string, offset int64) ([]Message, int64, error) {
 	}
 	return out, pos, nil
 }
+
+// HostMarker is in every prompt x-mem sends to an agent to sort session
+// candidates; a session that holds it is x-mem's own run, not a person.
+const HostMarker = "〔x-mem 记忆整理任务，不是用户的对话〕"
 
 // line covers the fields of all three formats.
 type line struct {

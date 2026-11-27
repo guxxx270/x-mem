@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"x-mem/internal/capture"
+	"x-mem/internal/config"
+	"x-mem/internal/writer"
 )
 
 // x-mem capture on|off|status
@@ -26,7 +29,11 @@ func cmdCapture(args []string) error {
 		fs := flag.NewFlagSet("capture on", flag.ExitOnError)
 		var exclude multi
 		fs.Var(&exclude, "exclude", "不采集这个项目目录，可写多次")
-		fs.Parse(args[1:])
+		host := fs.String("host", "", "用谁来整理候选：codex（默认）、antigravity，或 claude")
+		fs.Parse(reorder(fs, args[1:]))
+		if err := setHost(l, *host); err != nil {
+			return err
+		}
 		for _, e := range exclude {
 			abs, _ := filepath.Abs(e)
 			st.Exclude = append(st.Exclude, abs)
@@ -49,7 +56,8 @@ func cmdCapture(args []string) error {
 				fmt.Println(msg)
 			}
 		}
-		fmt.Println("还需要 Stop 钩子：运行过 x-mem install claude-code --apply 就有了。")
+		fmt.Println("整理候选用：", capture.HostName(writer.LoadSettings(l.Home).Host))
+		fmt.Println("还需要 Stop 钩子：运行过 x-mem install all --apply 就有了。")
 	case "off":
 		st.Enabled = false
 		if err := capture.SaveState(l, st); err != nil {
@@ -59,7 +67,16 @@ func cmdCapture(args []string) error {
 		if msg := capture.RemoveTimer(); msg != "" {
 			fmt.Println(msg)
 		}
+	case "host":
+		if len(args) != 2 {
+			return errors.New("用法：x-mem capture host codex|antigravity|claude")
+		}
+		if err := setHost(l, args[1]); err != nil {
+			return err
+		}
+		fmt.Println("整理候选改用：", capture.HostName(writer.LoadSettings(l.Home).Host))
 	case "status":
+		fmt.Println("整理候选用：", capture.HostName(writer.LoadSettings(l.Home).Host))
 		if st.Enabled {
 			fmt.Printf("会话采集：开（%s 起）\n", st.Since.Format("2006-01-02 15:04"))
 			if !st.LastScan.IsZero() {
@@ -72,7 +89,39 @@ func cmdCapture(args []string) error {
 			fmt.Println("会话采集：关（x-mem capture on 打开）")
 		}
 	default:
-		return errors.New("用法：x-mem capture on [--exclude 目录] | off | status")
+		return errors.New("用法：x-mem capture on [--host codex|antigravity|claude] [--exclude 目录] | host <名字> | off | status")
 	}
 	return nil
+}
+
+// setHost records which agent sorts the candidates, with the full path of
+// its program so the half-hourly job finds it too. Empty keeps the current
+// choice, or picks Codex, then Antigravity, when there is none.
+func setHost(l config.Layers, name string) error {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		if cur := writer.LoadSettings(l.Home).Host; len(cur) > 0 {
+			return nil
+		}
+		for _, k := range capture.Hosts {
+			if bin, ok := capture.HostBinary(k); ok {
+				return config.SetConfig(l.Home, "host", []string{bin})
+			}
+		}
+		return nil // none installed: candidates go to the inbox as they are
+	}
+	kind := map[string]string{"codex": "codex", "antigravity": "antigravity", "agy": "antigravity", "claude": "claude"}[name]
+	if kind == "" {
+		return fmt.Errorf("不认识的整理助手 %q：可以用 codex、antigravity 或 claude", name)
+	}
+	bin, ok := capture.HostBinary(kind)
+	if !ok {
+		hint := map[string]string{
+			"codex":       "没找到 codex 命令。Codex App 里的命令行要单独装：npm i -g @openai/codex，或 brew install codex",
+			"antigravity": "没找到 agy（Antigravity 命令行）。它和 Antigravity App 是分开装的，装好并在终端里登录一次 agy 后再试",
+			"claude":      "没找到 claude 命令",
+		}[kind]
+		return errors.New(hint)
+	}
+	return config.SetConfig(l.Home, "host", []string{bin})
 }

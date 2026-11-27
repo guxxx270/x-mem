@@ -76,6 +76,28 @@ func SaveKB(home string, kbs []KB) error {
 	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
+// SetConfig sets (nil removes) one key of config.json in the x-mem home,
+// keeping the file's other settings.
+func SetConfig(home, key string, value any) error {
+	path := filepath.Join(home, "config.json")
+	cfg := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return fmt.Errorf("%s 不是合法的 JSON：%v", path, err)
+		}
+	}
+	if value == nil {
+		delete(cfg, key)
+	} else {
+		cfg[key] = value
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
 func expand(p string) string {
 	p = strings.TrimSpace(p)
 	if strings.HasPrefix(p, "~/") {
