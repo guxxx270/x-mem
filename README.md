@@ -30,7 +30,8 @@ x-mem doctor                                 # 确认都接好了
 | 会话采集 | Stop | Stop | Stop |
 | MCP（recall / read / propose / status） | `claude mcp add` | `codex mcp add` | `mcp_config.json` |
 
-- **Codex** 只运行你信任过的钩子：装好后在 Codex 里输入 `/hooks` 信任一次。
+- **Codex** 只运行你信任过的钩子：装好后在 Codex 里信任一次（CLI 输入 `/hooks`；App 在 设置 → Hooks）。信任记录按钩子在 `hooks.json` 里的位置算，位置变了（比如删掉了排在前面的 旧记忆库 钩子）要重新信任。`x-mem doctor` 会指出哪几个还没信任。没信任时 MCP 仍然可用（Codex 会按 AGENTS.md 主动 recall），只是每条消息的自动想起和动作前规则不生效。
+- **Antigravity** 的 PreToolUse 必须回 `{"decision":"allow"}` 才放行，回 `{}` 等于拒绝；x-mem 0.4.1 起在没命中规则、出错、关闭时都明确回 allow（0.4.0 有这个问题，会拦下所有工具调用）。
 - 规则的触发条件三端通用：`Bash(git push*)` 在 Codex 里匹配它的 shell，在 Antigravity 里匹配 `run_command`；`Edit(*.sql)` 也匹配 Codex 的 `apply_patch` 和 Antigravity 的改文件工具。
 - 原话核对和会话采集读三家各自的会话文件（`~/.claude/projects`、`~/.codex/sessions`、`~/.gemini/antigravity*/brain`），自动跳过 `claude -p`、`codex exec` 这类无头运行。
 
@@ -40,7 +41,7 @@ x-mem doctor                                 # 确认都接好了
 sh scripts/install.sh ~/Documents/知识库
 ```
 
-依次：安装到 `~/.x-mem/bin` → 建个人层 → 从 旧记忆库 库导入 → 库里没导入的部分（时间日志、会话摘录、资料）登记成知识库 → 接入三端 → 运行 旧记忆库 自带的卸载脚本，并清掉它在 Antigravity 里的条目。旧记忆库 的库和钥匙文件都不动。加 `--keep-legacy` 只导入、不停用。
+依次：安装到 `~/.x-mem/bin` → 建个人层 → 从 旧记忆库 库导入 → 库里没导入的部分（时间日志、会话摘录、资料）登记成知识库 → 接入三端 → 运行 旧记忆库 自带的卸载脚本，再用 `x-mem install all --apply --drop` 清掉卸载脚本漏下的 旧记忆库 钩子和 MCP（Claude Code、Codex、Antigravity、Claude 桌面版，改之前都备份）。旧记忆库 的库和钥匙文件都不动。已经迁移过、只想清 旧记忆库 的残留，单独跑这一条就行。加 `--keep-legacy` 只导入、不停用。
 
 导入规则（也可单独运行 `x-mem import obsidian [库目录] --dry-run` 预演）：
 

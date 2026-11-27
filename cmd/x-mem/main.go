@@ -440,7 +440,7 @@ func cmdDoctor() int {
 			}
 		}
 		if strings.Contains(strings.ToLower(c.hooks+c.mcp), "old-mem") {
-			note("%s 的配置里还有 旧记忆库 的条目；不用 旧记忆库 了就运行它的 uninstall.sh，或手动删掉", c.name)
+			note("%s 的配置里还有 旧记忆库 的条目 → x-mem install all --apply --drop（只拿掉配置条目，先备份）", c.name)
 		}
 	}
 	in := writer.NewInbox(l.State)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -30,7 +31,7 @@ func cmdInstall(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	apply := fs.Bool("apply", false, "直接修改配置（先备份）")
 	remove := fs.Bool("remove", false, "把 x-mem 从这个应用里拿掉")
-	dropKR := fs.Bool("drop-old-mem", false, "顺手删掉 Antigravity 配置里 旧记忆库 的 MCP 和钩子（旧记忆库 的卸载脚本不管 Antigravity）")
+	dropKR := fs.Bool("drop-old-mem", false, "顺手把 旧记忆库 的钩子和 MCP 从这些应用的配置里拿掉（不删 旧记忆库 自己的文件）")
 	fs.Parse(args[1:])
 
 	exe, err := os.Executable()
@@ -163,8 +164,84 @@ func (in installer) claude() error {
 	if err := in.hooksFile(settingsPath(), ours); err != nil {
 		return err
 	}
-	return in.mcpCLI("claude", []string{"mcp", "add", "--scope", "user", "x-mem", "--", in.exe, "mcp"},
-		[]string{"mcp", "remove", "--scope", "user", "x-mem"})
+	if err := in.mcpCLI("claude", []string{"mcp", "add", "--scope", "user", "x-mem", "--", in.exe, "mcp"},
+		[]string{"mcp", "remove", "--scope", "user", "x-mem"}); err != nil {
+		return err
+	}
+	if in.dropLegacy && in.apply && !in.remove {
+		var cfg struct {
+			Servers map[string]any `json:"mcpServers"`
+		}
+		raw, _ := os.ReadFile(filepath.Join(home(), ".claude.json"))
+		_ = json.Unmarshal(raw, &cfg)
+		for name, v := range cfg.Servers {
+			if strings.Contains(strings.ToLower(name), "old-mem") || mentionsLegacy(v) {
+				in.dropMCP("claude", name, []string{"mcp", "remove", "--scope", "user", name})
+			}
+		}
+		desktop := claudeDesktopConfig()
+		raw, _ = os.ReadFile(desktop)
+		cfg.Servers = nil
+		_ = json.Unmarshal(raw, &cfg)
+		for name, v := range cfg.Servers {
+			if strings.Contains(strings.ToLower(name), "old-mem") || mentionsLegacy(v) {
+				if err := in.jsonKey(desktop, []string{"mcpServers", name}, nil); err == nil {
+					in.say("Claude 桌面版要重启一次才会不再加载 旧记忆库")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// claudeDesktopConfig is where the Claude desktop app keeps its local MCP
+// servers.
+func claudeDesktopConfig() string {
+	if d := os.Getenv("X_MEM_CLAUDE_DESKTOP_CONFIG"); d != "" {
+		return d
+	}
+	if d, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(d, "Claude", "claude_desktop_config.json")
+	}
+	return filepath.Join(home(), "Library", "Application Support", "Claude", "claude_desktop_config.json")
+}
+
+// dropMCP removes another tool's MCP server through the agent's own command.
+func (in installer) dropMCP(bin, name string, args []string) {
+	path, err := exec.LookPath(bin)
+	if err != nil {
+		in.say("旧记忆库 的 MCP（%s）请手动去掉：%s %s", name, bin, strings.Join(quoteAll(args), " "))
+		return
+	}
+	if out, err := exec.Command(path, args...).CombinedOutput(); err != nil {
+		in.say("旧记忆库 的 MCP（%s）没去掉：%s", name, strings.TrimSpace(string(out)))
+		return
+	}
+	in.say("旧记忆库 的 MCP 已去掉：%s", name)
+}
+
+var tomlSection = regexp.MustCompile(`(?m)^\[mcp_servers\.("?)([^\]"]+)("?)\]\s*$`)
+
+// codexMatchingServers lists the MCP servers in Codex's config.toml that run
+// 旧记忆库.
+func codexMatchingServers(toml string) []string {
+	var names []string
+	locs := tomlSection.FindAllStringSubmatchIndex(toml, -1)
+	for i, loc := range locs {
+		name := toml[loc[4]:loc[5]]
+		end := len(toml)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		if next := strings.Index(toml[loc[1]:end], "\n["); next >= 0 {
+			end = loc[1] + next
+		}
+		body := strings.ToLower(name + toml[loc[1]:end])
+		if strings.Contains(body, "old-mem") {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // codex: the same hook format in ~/.codex/hooks.json, MCP through `codex
@@ -184,11 +261,17 @@ func (in installer) codex() error {
 	if err := in.mcpCLI("codex", []string{"mcp", "add", "x-mem", "--", in.exe, "mcp"}, []string{"mcp", "remove", "x-mem"}); err != nil {
 		return err
 	}
+	if in.dropLegacy && in.apply && !in.remove {
+		raw, _ := os.ReadFile(filepath.Join(codexDir(), "config.toml"))
+		for _, name := range codexMatchingServers(string(raw)) {
+			in.dropMCP("codex", name, []string{"mcp", "remove", name})
+		}
+	}
 	if err := in.block(filepath.Join(codexDir(), "AGENTS.md")); err != nil {
 		return err
 	}
 	if in.apply && !in.remove {
-		in.say("在 Codex 里输入 /hooks，信任 x-mem 的四个钩子（Codex 只运行信任过的钩子）")
+		in.say("在 Codex 里信任 x-mem 的四个钩子：CLI 里输入 /hooks，App 里是 设置 → Hooks（Codex 只运行信任过的钩子；钩子位置变了要重新信任）")
 	}
 	return nil
 }
@@ -293,9 +376,12 @@ func (in installer) hooksFile(path string, ours map[string]any) error {
 	if in.remove {
 		ours = nil
 	}
-	backup, err := mergeHooks(path, ours, in.remove)
+	backup, dropped, err := mergeHooks(path, ours, in.remove, in.dropLegacy)
 	if err != nil {
 		return err
+	}
+	if dropped > 0 {
+		in.say("旧记忆库 的钩子已拿掉：%d 个", dropped)
 	}
 	if backup != "" {
 		in.say("已备份：%s", backup)
@@ -436,22 +522,25 @@ func (in installer) block(path string) error {
 // "hooks" object (Claude Code's settings.json, Codex's hooks.json). Groups
 // whose command runs "x-mem hook" are replaced (or, with remove, dropped);
 // every other group and top-level key stays where it was.
-func mergeHooks(path string, ours map[string]any, remove bool) (backup string, err error) {
+//
+// With dropLegacy, hooks that run 旧记忆库 are taken out too, one by one, so
+// another tool's hook sharing a group with one stays.
+func mergeHooks(path string, ours map[string]any, remove, dropLegacy bool) (backup string, dropped int, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
-		return "", err
+		return "", 0, err
 	}
 	if remove && len(raw) == 0 {
-		return "", nil
+		return "", 0, nil
 	}
 	keys, vals, err := orderedObject(raw)
 	if err != nil {
-		return "", fmt.Errorf("%s 不是合法的 JSON，没有改动：%v", path, err)
+		return "", 0, fmt.Errorf("%s 不是合法的 JSON，没有改动：%v", path, err)
 	}
 	hooks := map[string]any{}
 	if v, ok := vals["hooks"]; ok {
 		if err := json.Unmarshal(v, &hooks); err != nil {
-			return "", fmt.Errorf("%s 里的 hooks 读不懂，没有改动：%v", path, err)
+			return "", 0, fmt.Errorf("%s 里的 hooks 读不懂，没有改动：%v", path, err)
 		}
 	} else {
 		keys = append(keys, "hooks")
@@ -463,9 +552,19 @@ func mergeHooks(path string, ours map[string]any, remove bool) (backup string, e
 		}
 		var kept []any
 		for _, g := range groups {
-			if !isOurHook(g) {
-				kept = append(kept, g)
+			if isOurHook(g) {
+				continue
 			}
+			if dropLegacy {
+				var n int
+				if g, n = withoutLegacy(g); n > 0 {
+					dropped += n
+					if g == nil {
+						continue
+					}
+				}
+			}
+			kept = append(kept, g)
 		}
 		if len(kept) == 0 {
 			delete(hooks, event)
@@ -479,10 +578,52 @@ func mergeHooks(path string, ours map[string]any, remove bool) (backup string, e
 	}
 	hv, err := json.Marshal(hooks)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	vals["hooks"] = hv
-	return writeOrdered(path, raw, keys, vals)
+	backup, err = writeOrdered(path, raw, keys, vals)
+	return backup, dropped, err
+}
+
+// mentionsLegacy says whether a config entry belongs to 旧记忆库.
+func mentionsLegacy(v any) bool {
+	b, _ := json.Marshal(v)
+	s := strings.ToLower(string(b))
+	return strings.Contains(s, "old-mem")
+}
+
+// withoutLegacy takes 旧记忆库's hooks out of one hook group. It returns nil
+// when nothing is left in the group, and how many hooks it took out.
+func withoutLegacy(g any) (any, int) {
+	m, ok := g.(map[string]any)
+	if !ok {
+		if mentionsLegacy(g) {
+			return nil, 1
+		}
+		return g, 0
+	}
+	list, ok := m["hooks"].([]any)
+	if !ok {
+		if _, isCmd := m["command"]; isCmd && mentionsLegacy(m) {
+			return nil, 1
+		}
+		return g, 0
+	}
+	var kept []any
+	for _, h := range list {
+		if !mentionsLegacy(h) {
+			kept = append(kept, h)
+		}
+	}
+	n := len(list) - len(kept)
+	if n == 0 {
+		return g, 0
+	}
+	if len(kept) == 0 {
+		return nil, n
+	}
+	m["hooks"] = kept
+	return m, n
 }
 
 // writeOrdered writes a JSON object with its keys in the given order,

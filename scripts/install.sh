@@ -92,8 +92,8 @@ else
   else
     echo "没找到 旧记忆库 的 uninstall.sh，旧记忆库 没有停用。找到它的安装目录后运行：sh <目录>/scripts/uninstall.sh"
   fi
-  # 旧记忆库 的卸载脚本不管 Antigravity：它的 MCP 和钩子条目由 x-mem 删掉（先备份）
-  "$X" install antigravity --apply --drop >/dev/null && echo "Antigravity 里 旧记忆库 的条目已清理"
+  # 卸载脚本漏下的（以及它不管的 Antigravity、Claude 桌面版）旧记忆库 钩子和 MCP 由 x-mem 拿掉（先备份）
+  "$X" install all --apply --drop | grep -E "旧记忆库|信任" || true
 fi
 
 step "检查"
