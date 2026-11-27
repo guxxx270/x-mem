@@ -23,6 +23,7 @@ import (
 	"x-mem/internal/inject"
 	"x-mem/internal/recall"
 	"x-mem/internal/textutil"
+	"x-mem/internal/writer"
 )
 
 // Budgets in model tokens.
@@ -164,7 +165,8 @@ func start(in Input, l config.Layers, now time.Time) (string, error) {
 			others = append(others, d)
 		}
 	}
-	if len(rules) == 0 && len(recent) == 0 && len(others) == 0 {
+	pending := len(writer.NewInbox(l.State).List(writer.Review))
+	if len(rules) == 0 && len(recent) == 0 && len(others) == 0 && pending == 0 {
 		return "", nil
 	}
 	sort.SliceStable(rules, func(i, j int) bool { return rules[i].Layer > rules[j].Layer })
@@ -177,7 +179,14 @@ func start(in Input, l config.Layers, now time.Time) (string, error) {
 		}
 		return others[i].Updated > others[j].Updated
 	})
-	return reply("SessionStart", inject.StartBlock(rules, recent, others, StartBudget)), nil
+	block := ""
+	if len(rules)+len(recent)+len(others) > 0 {
+		block = inject.StartBlock(rules, recent, others, StartBudget)
+	}
+	if pending > 0 {
+		block = strings.TrimSpace(block + fmt.Sprintf("\n\nx-mem 收件箱里有 %d 条记忆提案等用户确认。合适的时候提一句（用户可以说“过一下收件箱”），不要替他确认。", pending))
+	}
+	return reply("SessionStart", block), nil
 }
 
 func prompt(in Input, l config.Layers, now time.Time) (string, error) {

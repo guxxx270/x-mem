@@ -129,3 +129,15 @@ func TestNoVaultMeansSilence(t *testing.T) {
 		t.Fatalf("got %s", out)
 	}
 }
+
+func TestStartMentionsInbox(t *testing.T) {
+	home, proj := setup(t)
+	if out := context(t, runHook(t, "start", "s1", "", proj)); strings.Contains(out, "收件箱") {
+		t.Fatalf("no reminder when the inbox is empty: %s", out)
+	}
+	os.MkdirAll(filepath.Join(home, "state", "inbox"), 0o700)
+	os.WriteFile(filepath.Join(home, "state", "inbox", "p-1.json"), []byte(`{"id":"p-1","status":"review","title":"t","text":"x"}`), 0o600)
+	if out := context(t, runHook(t, "start", "s2", "", proj)); !strings.Contains(out, "收件箱里有 1 条") {
+		t.Fatalf("start should mention the waiting proposal: %s", out)
+	}
+}

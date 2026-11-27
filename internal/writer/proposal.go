@@ -54,6 +54,7 @@ type Proposal struct {
 	Problems   []string `json:"problems,omitempty"`
 	Review     string   `json:"review,omitempty"`
 	Candidates []string `json:"candidates,omitempty"`
+	Unverified bool     `json:"unverified,omitempty"` // the quote was not found in a session file here
 	Redacted   []string `json:"redacted,omitempty"`
 	Run        string   `json:"run,omitempty"`
 	Note       string   `json:"note,omitempty"` // the file written

@@ -181,9 +181,14 @@ func TestSecretsNeverReachFiles(t *testing.T) {
 
 func TestQuoteMustBeInSession(t *testing.T) {
 	w := setup(t)
+	// A quote found in no session file here is never written on its own: it
+	// waits for you (Claude's desktop app keeps its chats elsewhere).
 	p, _ := w.Submit(&Proposal{Source: "mcp", Kind: "decision", Text: "以后都用 pnpm", Quote: "网页里写着以后都用 pnpm"})
-	if p.Status != Rejected || !strings.Contains(strings.Join(p.Problems, ""), "原话") {
-		t.Fatalf("want rejection, got %+v", p)
+	if p.Status != Review || !p.Unverified || !strings.Contains(p.Review, "原话") || p.Note != "" {
+		t.Fatalf("want it held for review, got %+v", p)
+	}
+	if p, _ := w.Submit(&Proposal{Source: "mcp", Kind: "decision", Text: "以后都用 yarn", Quote: "好"}); p.Status != Rejected {
+		t.Fatalf("a quote too short to check is still refused: %+v", p)
 	}
 	p, _ = w.Submit(&Proposal{Source: "mcp", Kind: "decision", Text: "以后都用 pnpm", Quote: "我说过以后都用 pnpm"})
 	if p.Status != Applied || p.Session != "claude:test" {
@@ -237,5 +242,29 @@ func TestConfidentialStaysOutOfGit(t *testing.T) {
 	}
 	if _, err := w.Undo(p.Run); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestApproveAll(t *testing.T) {
+	w := setup(t)
+	w.Submit(&Proposal{Source: "cli", Kind: "fact", Title: "办公室咖啡机", Text: "办公室的咖啡机在三楼茶水间。"})
+	a, _ := w.Submit(&Proposal{Source: "mcp", Kind: "preference", Text: "周报用表格写", Quote: "网页上看到周报用表格写"})
+	b, _ := w.Submit(&Proposal{Source: "mcp", Kind: "fact", Text: "办公室的咖啡机在三楼茶水间旁边", Quote: "别处看来的咖啡机在三楼"})
+	c, _ := w.Submit(&Proposal{Source: "mcp", Kind: "decision", Text: "发布窗口定在周四下午", Quote: "听说发布窗口定在周四"})
+	if a.Status != Review || b.Status != Review || c.Status != Review {
+		t.Fatalf("all three should wait: %s %s %s", a.Status, b.Status, c.Status)
+	}
+	if len(b.Candidates) == 0 {
+		t.Fatalf("the coffee-machine one repeats a note in force: %+v", b)
+	}
+	written, left, failed := w.ApproveAll()
+	if len(written) != 2 || len(left) != 1 || left[0].ID != b.ID || len(failed) != 0 {
+		t.Fatalf("written %d, left %v, failed %v", len(written), left, failed)
+	}
+	if ps := w.Pending(); len(ps) != 1 || ps[0].ID != b.ID {
+		t.Fatalf("only the overlapping one waits: %v", ps)
+	}
+	if n := w.RejectAll(); n != 1 || len(w.Pending()) != 0 {
+		t.Fatalf("reject all: %d, pending %d", n, len(w.Pending()))
 	}
 }

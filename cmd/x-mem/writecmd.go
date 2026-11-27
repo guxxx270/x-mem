@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -97,7 +98,7 @@ func cmdInbox(args []string) error {
 				fmt.Printf("    %s\n", strings.Join(p.Problems, "；"))
 			}
 		}
-		fmt.Println("\n看详情：x-mem inbox show <编号>；写入：approve <编号> [--supersedes id [--line 原文]]；不要：reject <编号>")
+		fmt.Println("\n逐条过：x-mem inbox review；全收：approve --all；看详情：show <编号>；写入：approve <编号> [--supersedes id [--line 原文]]；不要：reject <编号>")
 	case "show":
 		if len(args) != 1 {
 			return errors.New("用法：x-mem inbox show <编号>")
@@ -127,9 +128,14 @@ func cmdInbox(args []string) error {
 		fs := flag.NewFlagSet("approve", flag.ExitOnError)
 		sup := fs.String("supersedes", "", "改成取代这条笔记")
 		line := fs.String("line", "", "只取代那条笔记里的这一行")
+		all := fs.Bool("all", false, "全收：写入所有等你确认的提案（可能和已有笔记重复的留给你逐条定）")
 		fs.Parse(reorder(fs, args))
+		if *all {
+			printApproveAll(w)
+			return nil
+		}
 		if fs.NArg() == 0 {
-			return errors.New("用法：x-mem inbox approve <编号>… [--supersedes id [--line 原文]]")
+			return errors.New("用法：x-mem inbox approve <编号>… [--supersedes id [--line 原文]]，或 approve --all")
 		}
 		for _, id := range fs.Args() {
 			p, err := w.Approve(id, *sup, *line)
@@ -140,8 +146,12 @@ func cmdInbox(args []string) error {
 			}
 		}
 	case "reject":
+		if len(args) == 1 && args[0] == "--all" {
+			fmt.Printf("已拒绝 %d 条。\n", w.RejectAll())
+			return nil
+		}
 		if len(args) == 0 {
-			return errors.New("用法：x-mem inbox reject <编号>…")
+			return errors.New("用法：x-mem inbox reject <编号>…，或 reject --all")
 		}
 		for _, id := range args {
 			if _, err := w.Reject(id, ""); err != nil {
@@ -150,8 +160,88 @@ func cmdInbox(args []string) error {
 			}
 			fmt.Println("已拒绝：", id)
 		}
+	case "review":
+		return reviewInbox(w, os.Stdin)
 	default:
-		return fmt.Errorf("用法：x-mem inbox [list [--all] | show | approve | reject]")
+		return fmt.Errorf("用法：x-mem inbox [list [--all] | review | show | approve [--all] | reject [--all]]")
+	}
+	return nil
+}
+
+func printApproveAll(w *writer.Writer) {
+	written, left, failed := w.ApproveAll()
+	for _, p := range written {
+		fmt.Printf("已写入：%s\n", p.Title)
+	}
+	for id, err := range failed {
+		fmt.Printf("没写成 %s：%v\n", id, err)
+	}
+	if len(written)+len(left)+len(failed) == 0 {
+		fmt.Println("没有等你确认的提案。")
+		return
+	}
+	if len(left) > 0 {
+		fmt.Printf("\n%d 条可能和已有笔记重复，留给你定（x-mem inbox review）：\n", len(left))
+		for _, p := range left {
+			fmt.Printf("  %s  %s（像 %s）\n", p.ID, p.Title, strings.Join(p.Candidates, "、"))
+		}
+	}
+	if len(written) > 0 {
+		fmt.Println("\n写错了可以撤回：x-mem log 找到那次写入，x-mem undo <run>")
+	}
+}
+
+// reviewInbox walks the proposals waiting for you, one key each.
+func reviewInbox(w *writer.Writer, stdin *os.File) error {
+	ps := w.Pending()
+	if len(ps) == 0 {
+		fmt.Println("没有等你确认的提案。")
+		return nil
+	}
+	r := bufio.NewReader(stdin)
+	for i, p := range ps {
+		fmt.Printf("\n[%d/%d] %s（%s，%s）\n  %s\n", i+1, len(ps), p.Title, p.Kind, p.Created.Format("01-02 15:04"), p.Text)
+		if p.Quote != "" {
+			fmt.Printf("  原话：%s\n", p.Quote)
+		}
+		if p.Review != "" {
+			fmt.Printf("  %s\n", p.Review)
+		}
+		prompt := "  y 写入 / n 不要 / s 跳过 / q 结束"
+		if len(p.Candidates) > 0 {
+			prompt = "  y 另记一条 / r 取代 " + p.Candidates[0] + " / n 不要 / s 跳过 / q 结束"
+		}
+		fmt.Print(prompt + "：")
+		line, err := r.ReadString('\n')
+		if err != nil && line == "" {
+			return nil
+		}
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "y", "yes", "是":
+			got, err := w.Approve(p.ID, "", "")
+			if got != nil {
+				fmt.Print("  " + strings.ReplaceAll(strings.TrimRight(writer.Describe(got, err), "\n"), "\n", "\n  ") + "\n")
+			} else if err != nil {
+				fmt.Println(" ", err)
+			}
+		case "r":
+			if len(p.Candidates) == 0 {
+				fmt.Println("  这条没有可取代的笔记，跳过")
+				continue
+			}
+			got, err := w.Approve(p.ID, p.Candidates[0], "")
+			if got != nil {
+				fmt.Print("  " + strings.ReplaceAll(strings.TrimRight(writer.Describe(got, err), "\n"), "\n", "\n  ") + "\n")
+			}
+		case "n", "no", "否":
+			if _, err := w.Reject(p.ID, ""); err == nil {
+				fmt.Println("  已拒绝")
+			}
+		case "q", "quit":
+			return nil
+		default:
+			fmt.Println("  跳过")
+		}
 	}
 	return nil
 }

@@ -3,10 +3,12 @@ package index_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"x-mem/internal/config"
+	"x-mem/internal/extract"
 	"x-mem/internal/index"
 )
 
@@ -89,4 +91,96 @@ func TestNoteBodyIsReadLazily(t *testing.T) {
 		t.Fatalf("lookup/lazy read failed: %+v", d)
 	}
 	_ = p
+}
+
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Dir(dst), 0o755)
+	write(t, dst, string(data))
+}
+
+// Documents in the knowledge base are read in the background: until then
+// they are listed as waiting, not searchable, and a hook never waits.
+func TestDocumentsAreReadInTheBackground(t *testing.T) {
+	l, p := setup(t)
+	kb := t.TempDir()
+	copyFile(t, "../extract/testdata/sample.docx", filepath.Join(kb, "规程/档案规程.docx"))
+	copyFile(t, "../extract/testdata/sample.pdf", filepath.Join(kb, "规程/档案规程.pdf"))
+	write(t, filepath.Join(kb, "~$档案规程.docx"), "lock file")
+	l.KB = []config.KB{{Path: kb}}
+
+	pending := 0
+	index.OnPending = func(config.Layers) { pending++ }
+	defer func() { index.OnPending = nil }()
+	ix, err := index.Open(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ix.Waiting != 2 || pending != 1 || ix.DF("档案") != 0 {
+		t.Fatalf("waiting %d, pending calls %d, df %d", ix.Waiting, pending, ix.DF("档案"))
+	}
+	ix.Close()
+
+	// The background reader fills the text cache, then drops the cache of
+	// the knowledge base.
+	for _, f := range []string{"规程/档案规程.docx", "规程/档案规程.pdf"} {
+		path := filepath.Join(kb, f)
+		st, _ := os.Stat(path)
+		text, err := extract.Text(path)
+		extract.Store(l.State, path, st.Size(), st.ModTime().UnixNano(), text, err)
+	}
+	index.InvalidateKB(l)
+	ix, _ = index.Open(l)
+	if ix.Waiting != 0 || ix.DF("归档") != 2 {
+		t.Fatalf("after reading: waiting %d, df(归档) %d", ix.Waiting, ix.DF("归档"))
+	}
+	var doc *index.Doc
+	for _, d := range ix.Docs {
+		if d.Layer == "kb" && filepath.Ext(d.Path) == ".pdf" {
+			doc = d
+		}
+	}
+	if doc == nil || doc.Title != "档案规程" || !doc.Active {
+		t.Fatalf("pdf doc: %+v", doc)
+	}
+	if body := doc.Note().Body; !strings.Contains(body, "三十日内归档") {
+		t.Fatalf("lazy body from the text cache: %q", body)
+	}
+	ix.Close()
+
+	// Writing a note rebuilds the memory, not the knowledge base.
+	time.Sleep(10 * time.Millisecond)
+	write(t, p, "---\nid: a\ntitle: 发版日\n---\n每周四发版。\n")
+	ix, _ = index.Open(l)
+	defer ix.Close()
+	if !ix.Rebuilt || ix.DF("周四") != 1 || ix.DF("归档") != 2 {
+		t.Fatalf("memory rebuilt with kb intact: rebuilt %v df(周四) %d df(归档) %d", ix.Rebuilt, ix.DF("周四"), ix.DF("归档"))
+	}
+}
+
+func TestUnreadableDocumentIsReported(t *testing.T) {
+	l, _ := setup(t)
+	kb := t.TempDir()
+	write(t, filepath.Join(kb, "坏文件.pdf"), "not a pdf at all")
+	l.KB = []config.KB{{Path: kb}}
+	index.ExtractInline = true
+	defer func() { index.ExtractInline = false }()
+	ix, err := index.Open(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ix.Close()
+	for _, d := range ix.Docs {
+		if d.Layer == "kb" {
+			if d.Active || !strings.HasPrefix(d.Unread, "读不出文字") || d.Waiting {
+				t.Fatalf("bad pdf: %+v", d)
+			}
+			return
+		}
+	}
+	t.Fatal("bad pdf not listed")
 }

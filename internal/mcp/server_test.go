@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -62,5 +63,53 @@ func TestServeRecallReadStatus(t *testing.T) {
 	}
 	if !strings.Contains(lines[5], "-32601") {
 		t.Fatalf("unknown method must be an error: %s", lines[5])
+	}
+}
+
+func TestInboxTool(t *testing.T) {
+	home := t.TempDir()
+	os.MkdirAll(filepath.Join(home, "personal", "notes"), 0o755)
+	for _, args := range [][]string{{"init", "-q"}, {"config", "user.email", "t@example.com"}, {"config", "user.name", "t"}} {
+		exec.Command("git", append([]string{"-C", filepath.Join(home, "personal")}, args...)...).Run()
+	}
+	t.Setenv("X_MEM_HOME", home)
+	t.Setenv("X_MEM_PROJECT", filepath.Join(home, "no-project"))
+	t.Setenv("HOME", home) // no session files: every quote is unverified
+
+	call := func(name, args string) string {
+		in := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + name + `","arguments":` + args + `}}`
+		var out bytes.Buffer
+		Serve(strings.NewReader(in), &out)
+		var r struct {
+			Result struct {
+				Content []struct{ Text string } `json:"content"`
+			} `json:"result"`
+		}
+		json.Unmarshal(out.Bytes(), &r)
+		return r.Result.Content[0].Text
+	}
+	got := call("propose", `{"text":"周报统一用表格写","quote":"以后周报统一用表格写","kind":"preference"}`)
+	if !strings.Contains(got, "待用户确认") {
+		t.Fatalf("a quote not found here waits in the inbox: %s", got)
+	}
+	if got := call("inbox", `{"action":"list"}`); !strings.Contains(got, "周报统一用表格写") || !strings.Contains(got, "原话没在本机") {
+		t.Fatalf("list: %s", got)
+	}
+	if got := call("inbox", `{"action":"approve","ids":["all"]}`); !strings.Contains(got, "写入 1 条") {
+		t.Fatalf("approve all: %s", got)
+	}
+	if got := call("recall", `{"query":"周报用什么格式"}`); !strings.Contains(got, "表格") {
+		t.Fatalf("approved note is recalled: %s", got)
+	}
+	if got := call("inbox", `{"action":"list"}`); got != "收件箱是空的。" {
+		t.Fatalf("inbox should be empty: %s", got)
+	}
+}
+
+func TestInitializeSendsInstructions(t *testing.T) {
+	var out bytes.Buffer
+	Serve(strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`), &out)
+	if !strings.Contains(out.String(), "recall") || !strings.Contains(out.String(), "Claude 桌面版") {
+		t.Fatalf("initialize should carry the usage instructions: %s", out.String())
 	}
 }

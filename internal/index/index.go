@@ -7,6 +7,11 @@
 // The cache is two files per combination of layers: a small metadata file
 // (one record per note, the vocabulary and offsets) and a postings file read
 // with ReadAt, so a query only reads the postings of its own terms.
+//
+// Memory (personal and project notes) and the knowledge base are cached
+// apart: writing a note rebuilds only the memory part, never the documents,
+// and documents (Word, PDF, …) are read once into a text cache, in the
+// background when a hook is waiting.
 package index
 
 import (
@@ -24,11 +29,21 @@ import (
 	"time"
 
 	"x-mem/internal/config"
+	"x-mem/internal/extract"
 	"x-mem/internal/note"
 	"x-mem/internal/textutil"
 )
 
-const formatVersion = 6
+const formatVersion = 7
+
+// ExtractInline makes Open read documents that have no cached text yet
+// (x-mem kb add, reindex). Otherwise they wait for a background run, so a
+// hook never waits on a PDF.
+var ExtractInline bool
+
+// OnPending is called when knowledge-base documents are waiting to be read;
+// the command line starts the background reader here.
+var OnPending func(l config.Layers)
 
 // Field weights: a term in the title or an alias counts three times a term in
 // the body.
@@ -65,15 +80,20 @@ type Doc struct {
 	Updated    string          // YYYY-MM-DD used for the recency boost
 	Summary    string          // first line still in force, for listings
 
+	TextFile string // a document read into the text cache: where its text is
+	Unread   string // why a document has no text (yet): it is then not in force
+	Waiting  bool   // its text has not been read yet
+
 	once sync.Once
 	note *note.Note
 }
 
-// Index is the cached state for one combination of layers.
-type Index struct {
+// part is the cached state for one group of layers: the memory (personal
+// and project) or the knowledge base.
+type part struct {
 	Version  int
 	Key      string
-	Day      string
+	Day      string // the memory is rebuilt daily (notes come into and out of force)
 	Docs     []*Doc
 	N        int
 	AvgLen   float64
@@ -84,7 +104,20 @@ type Index struct {
 	dir     string
 	post    *os.File
 	pending []byte // postings not yet written to disk
-	Rebuilt bool   // this call re-read the files
+	rebuilt bool
+	waiting int // knowledge base: documents not read yet
+}
+
+// Index is what a query sees: the memory and the knowledge base together.
+type Index struct {
+	Docs    []*Doc // memory first, then the knowledge base
+	N       int
+	AvgLen  float64
+	Day     string
+	Rebuilt bool // this call re-read files
+	Waiting int  // knowledge-base documents still being read
+
+	mem, kb *part
 }
 
 // Posting is one note that contains a term, with the term's weighted frequency.
@@ -96,42 +129,133 @@ type Posting struct {
 // Open loads the cache for these layers and brings it up to date with the
 // files on disk.
 func Open(l config.Layers) (*Index, error) {
-	dir := l.State
-	metaPath := filepath.Join(dir, "index-"+l.Key()+".meta")
-	old := loadMeta(metaPath)
-	sigs, err := scan(l)
+	today := time.Now().Format("2006-01-02")
+	memL := l
+	memL.KB = nil
+	mem, err := openPart(memL, today, false)
 	if err != nil {
 		return nil, err
 	}
-	today := time.Now().Format("2006-01-02")
-	if old != nil && old.Version == formatVersion && old.Day == today && sameFiles(old, sigs) {
+	ix := &Index{mem: mem, Day: today}
+	if kbL := KBLayers(l); len(kbL.KB) > 0 {
+		kb, err := openPart(kbL, today, true)
+		if err != nil {
+			mem.close()
+			return nil, err
+		}
+		ix.kb = kb
+		if kb.waiting > 0 && !ExtractInline && OnPending != nil && !extract.Busy(l.State) {
+			OnPending(l)
+		}
+	}
+	ix.combine()
+	return ix, nil
+}
+
+// KBLayers is the knowledge-base part of a set of layers.
+func KBLayers(l config.Layers) config.Layers {
+	return config.Layers{Home: l.Home, State: l.State, KB: l.KB}
+}
+
+// InvalidateKB makes the next Open read the knowledge base again (after the
+// background reader has filled the text cache).
+func InvalidateKB(l config.Layers) {
+	_ = os.Remove(metaPath(KBLayers(l)))
+}
+
+func metaPath(l config.Layers) string {
+	return filepath.Join(l.State, "index-"+l.Key()+".meta")
+}
+
+func openPart(l config.Layers, today string, kb bool) (*part, error) {
+	dir := l.State
+	mp := metaPath(l)
+	old := loadMeta(mp)
+	sigs, err := scan(l, kb)
+	if err != nil {
+		return nil, err
+	}
+	day := today
+	if kb {
+		day = "" // reference material does not come into or out of force
+	}
+	if old != nil && old.Version == formatVersion && old.Day == day && sameFiles(old, sigs) {
 		f, err := os.Open(filepath.Join(dir, old.PostFile))
 		if err == nil {
-			old.dir, old.post, old.Rebuilt = dir, f, false
+			old.dir, old.post, old.rebuilt = dir, f, false
+			for _, d := range old.Docs {
+				if d.Waiting {
+					old.waiting++
+				}
+			}
 			return old, nil
 		}
 	}
-	ix, err := build(l, sigs, today)
+	p, err := build(l, sigs, today, kb)
 	if err != nil {
 		return nil, err
 	}
-	if err := ix.save(dir, metaPath, old); err != nil {
+	p.Day = day
+	if err := p.save(dir, mp, old); err != nil {
 		return nil, err
 	}
-	ix.Rebuilt = true
-	return ix, nil
+	p.rebuilt = true
+	return p, nil
+}
+
+// combine lays the two parts side by side for queries.
+func (ix *Index) combine() {
+	ix.Docs = append([]*Doc{}, ix.mem.Docs...)
+	ix.N, ix.AvgLen, ix.Rebuilt = ix.mem.N, ix.mem.AvgLen, ix.mem.rebuilt
+	if ix.kb == nil {
+		return
+	}
+	ix.Docs = append(ix.Docs, ix.kb.Docs...)
+	ix.N += ix.kb.N
+	if ix.N > 0 {
+		ix.AvgLen = (ix.mem.AvgLen*float64(ix.mem.N) + ix.kb.AvgLen*float64(ix.kb.N)) / float64(ix.N)
+	}
+	ix.Rebuilt = ix.Rebuilt || ix.kb.rebuilt
+	ix.Waiting = ix.kb.waiting
+	// A note pointing at a knowledge-base page: say so, rather than "not
+	// found" (the memory part was linked on its own).
+	for _, d := range ix.mem.Docs {
+		for _, r := range d.Relations {
+			if lookupIn(ix.mem.Docs, r.Target) != nil {
+				continue
+			}
+			if t := lookupIn(ix.kb.Docs, r.Target); t != nil {
+				missing := fmt.Sprintf("%s 指向的 %q 找不到", r.Op, r.Target)
+				for i, p := range d.Problems {
+					if p == missing {
+						d.Problems[i] = fmt.Sprintf("%s 指向的「%s」是知识库里的资料，不是记忆", r.Op, t.Title)
+					}
+				}
+			}
+		}
+	}
 }
 
 // Rebuild drops the cache and reads every file again.
 func Rebuild(l config.Layers) (*Index, error) {
-	_ = os.Remove(filepath.Join(l.State, "index-"+l.Key()+".meta"))
+	memL := l
+	memL.KB = nil
+	_ = os.Remove(metaPath(memL))
+	_ = os.Remove(metaPath(KBLayers(l)))
 	return Open(l)
 }
 
-// Close releases the postings file.
+// Close releases the postings files.
 func (ix *Index) Close() {
-	if ix.post != nil {
-		ix.post.Close()
+	ix.mem.close()
+	if ix.kb != nil {
+		ix.kb.close()
+	}
+}
+
+func (p *part) close() {
+	if p.post != nil {
+		p.post.Close()
 	}
 }
 
@@ -140,9 +264,12 @@ type sig struct {
 	size, mtime      int64
 }
 
-func scan(l config.Layers) ([]sig, error) {
+func scan(l config.Layers, kb bool) ([]sig, error) {
 	var out []sig
 	for _, root := range l.Roots() {
+		if (root.Name == "kb") != kb {
+			continue
+		}
 		err := filepath.WalkDir(root.Dir, func(p string, de fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
@@ -156,8 +283,12 @@ func scan(l config.Layers) ([]sig, error) {
 				}
 				return nil
 			}
-			if !strings.EqualFold(filepath.Ext(p), ".md") {
+			ext := strings.ToLower(filepath.Ext(p))
+			if ext != ".md" && !(kb && extract.Supported(ext)) {
 				return nil
+			}
+			if name := de.Name(); strings.HasPrefix(name, "~$") || strings.HasPrefix(name, ".") {
+				return nil // Office lock files, hidden files
 			}
 			info, err := de.Info()
 			if err != nil {
@@ -177,7 +308,7 @@ func scan(l config.Layers) ([]sig, error) {
 	return out, nil
 }
 
-func sameFiles(ix *Index, sigs []sig) bool {
+func sameFiles(ix *part, sigs []sig) bool {
 	if len(ix.Docs) != len(sigs) {
 		return false
 	}
@@ -194,12 +325,12 @@ func sameFiles(ix *Index, sigs []sig) bool {
 	return true
 }
 
-func loadMeta(path string) *Index {
+func loadMeta(path string) *part {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
-	var ix Index
+	var ix part
 	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&ix); err != nil {
 		return nil
 	}
@@ -208,14 +339,43 @@ func loadMeta(path string) *Index {
 
 // build parses every note, links relations, decides which notes are in force
 // and indexes those that are.
-func build(l config.Layers, sigs []sig, today string) (*Index, error) {
-	ix := &Index{Version: formatVersion, Key: l.Key(), Day: today, dir: l.State}
+func build(l config.Layers, sigs []sig, today string, kb bool) (*part, error) {
+	ix := &part{Version: formatVersion, Key: l.Key(), Day: today, dir: l.State}
 	for _, s := range sigs {
-		src, err := os.ReadFile(s.path)
-		if err != nil {
-			continue
+		var n *note.Note
+		var textFile, unread string
+		waiting := false
+		if strings.EqualFold(filepath.Ext(s.path), ".md") {
+			src, err := os.ReadFile(s.path)
+			if err != nil {
+				continue
+			}
+			n = note.Parse(string(src), s.rel)
+		} else {
+			// A document: its text comes from the text cache.
+			text, errMsg, ok := extract.Cached(l.State, s.path, s.size, s.mtime)
+			if !ok && ExtractInline {
+				t, err := extract.Text(s.path)
+				_ = extract.Store(l.State, s.path, s.size, s.mtime, t, err)
+				text, ok = t, true
+				if err != nil {
+					errMsg = err.Error()
+				}
+			}
+			n = note.Parse("", s.rel)
+			n.Title = strings.TrimSuffix(filepath.Base(s.rel), filepath.Ext(s.rel))
+			n.Type = "document"
+			textFile = extract.CacheFile(l.State, s.path)
+			switch {
+			case !ok:
+				unread, waiting = "还没读出文字（后台正在读）", true
+				ix.waiting++
+			case errMsg != "":
+				unread = "读不出文字：" + errMsg
+			default:
+				n.Body = text
+			}
 		}
-		n := note.Parse(string(src), s.rel)
 		n.Layer, n.Path = s.layer, s.path
 		d := &Doc{
 			ID: n.ID, Title: n.Title, Type: n.Type, Layer: s.layer, Rel: n.Rel, Path: s.path,
@@ -224,7 +384,8 @@ func build(l config.Layers, sigs []sig, today string) (*Index, error) {
 			Links: n.Links(), Session: n.SourceSession,
 			Size: s.size, MTime: s.mtime, NoteProblems: n.Problems,
 			Suspicious: note.Suspicious(n.Title + "\n" + n.Body),
-			note:       n,
+			TextFile:   textFile, Unread: unread, Waiting: waiting,
+			note: n,
 		}
 		d.once.Do(func() {})
 		ix.Docs = append(ix.Docs, d)
@@ -236,7 +397,12 @@ func build(l config.Layers, sigs []sig, today string) (*Index, error) {
 		}
 		return a.Rel < b.Rel
 	})
-	ix.link(today)
+	ix.link(today, kb)
+	for _, d := range ix.Docs {
+		if d.Unread != "" {
+			d.Active, d.Reason = false, d.Unread
+		}
+	}
 
 	termDocs := map[string][]Posting{}
 	total := 0.0
@@ -306,7 +472,7 @@ func build(l config.Layers, sigs []sig, today string) (*Index, error) {
 	return ix, nil
 }
 
-func (ix *Index) save(dir, metaPath string, old *Index) error {
+func (ix *part) save(dir, metaPath string, old *part) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -349,7 +515,7 @@ func (ix *Index) save(dir, metaPath string, old *Index) error {
 }
 
 // link resolves relations and decides which notes are in force today.
-func (ix *Index) link(today string) {
+func (ix *part) link(today string, kb bool) {
 	for _, d := range ix.Docs {
 		d.Active = true
 		switch d.note.Status {
@@ -368,12 +534,15 @@ func (ix *Index) link(today string) {
 			d.Active, d.Reason = false, "尚未生效（valid_from "+from+"）"
 		}
 	}
+	if kb {
+		return // reference material never changes what holds in memory
+	}
 	for _, d := range ix.Docs {
 		if d.note.Status == "draft" || d.Layer == "kb" {
-			continue // reference material never changes what holds in memory
+			continue
 		}
 		for _, r := range d.Relations {
-			t := ix.Lookup(r.Target)
+			t := lookupIn(ix.Docs, r.Target)
 			switch {
 			case t == nil:
 				d.Problems = append(d.Problems, fmt.Sprintf("%s 指向的 %q 找不到", r.Op, r.Target))
@@ -414,14 +583,14 @@ func (ix *Index) link(today string) {
 
 // findCycles reports notes whose @supersedes / @refines chain comes back to
 // itself: such a chain has no current version.
-func (ix *Index) findCycles() {
+func (ix *part) findCycles() {
 	next := map[*Doc][]*Doc{}
 	for _, d := range ix.Docs {
 		for _, r := range d.Relations {
 			if r.Op != "@supersedes" && r.Op != "@refines" {
 				continue
 			}
-			if t := ix.Lookup(r.Target); t != nil && t != d {
+			if t := lookupIn(ix.Docs, r.Target); t != nil && t != d {
 				next[d] = append(next[d], t)
 			}
 		}
@@ -467,6 +636,18 @@ func (ix *Index) findCycles() {
 // is gone it returns a stub built from the cached fields.
 func (d *Doc) Note() *note.Note {
 	d.once.Do(func() {
+		if d.TextFile != "" {
+			n := note.Parse("", d.Rel)
+			n.ID, n.Title, n.Type = d.ID, d.Title, d.Type
+			if data, err := os.ReadFile(d.TextFile); err == nil {
+				if _, body, ok := strings.Cut(string(data), "\n"); ok {
+					n.Body = body
+				}
+			}
+			n.Layer, n.Path = d.Layer, d.Path
+			d.note = n
+			return
+		}
 		if src, err := os.ReadFile(d.Path); err == nil {
 			d.note = note.Parse(string(src), d.Rel)
 			d.note.Layer, d.note.Path = d.Layer, d.Path
@@ -564,25 +745,27 @@ func cut(s string, max int) string {
 }
 
 // Lookup finds a note by id, file name, relative path or title.
-func (ix *Index) Lookup(ref string) *Doc {
+func (ix *Index) Lookup(ref string) *Doc { return lookupIn(ix.Docs, ref) }
+
+func lookupIn(docs []*Doc, ref string) *Doc {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return nil
 	}
-	for _, d := range ix.Docs {
+	for _, d := range docs {
 		if d.ID == ref {
 			return d
 		}
 	}
 	clean := strings.TrimSuffix(filepath.ToSlash(ref), ".md")
-	for _, d := range ix.Docs {
+	for _, d := range docs {
 		rel := strings.TrimSuffix(d.Rel, ".md")
 		stem := rel[strings.LastIndex(rel, "/")+1:]
 		if rel == clean || stem == clean || d.Path == ref {
 			return d
 		}
 	}
-	for _, d := range ix.Docs {
+	for _, d := range docs {
 		if strings.EqualFold(d.Title, ref) {
 			return d
 		}
@@ -592,6 +775,14 @@ func (ix *Index) Lookup(ref string) *Doc {
 
 // DF is the number of notes in force that contain a term.
 func (ix *Index) DF(t string) int {
+	n := ix.mem.df(t)
+	if ix.kb != nil {
+		n += ix.kb.df(t)
+	}
+	return n
+}
+
+func (ix *part) df(t string) int {
 	i := sort.SearchStrings(ix.Vocab, t)
 	if i >= len(ix.Vocab) || ix.Vocab[i] != t {
 		return 0
@@ -605,8 +796,20 @@ func (ix *Index) IDF(t string) float64 {
 	return math.Log(1 + (float64(ix.N)-df+0.5)/(df+0.5))
 }
 
-// Postings lists the notes that contain a term.
+// Postings lists the notes that contain a term (indexes into Docs).
 func (ix *Index) Postings(t string) []Posting {
+	out := ix.mem.postings(t)
+	if ix.kb != nil {
+		off := len(ix.mem.Docs)
+		for _, p := range ix.kb.postings(t) {
+			p.Doc += off
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (ix *part) postings(t string) []Posting {
 	i := sort.SearchStrings(ix.Vocab, t)
 	if i >= len(ix.Vocab) || ix.Vocab[i] != t {
 		return nil

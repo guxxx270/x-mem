@@ -5,6 +5,7 @@ package inject
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"x-mem/internal/index"
@@ -69,10 +70,15 @@ func Answer(res recall.Result, maxHits int) string {
 	return b.String()
 }
 
-// matchLine is the line of a reference page that best covers the question.
+// matchLine is the line of a reference page that best covers the question,
+// with the page, slide or sheet it is on when the document says.
 func matchLine(h recall.Hit) string {
-	best, bestN := "", 0
+	best, bestN, where, bestWhere := "", 0, "", ""
 	for _, l := range h.Doc.InForceLines() {
+		if m := placeMark.FindStringSubmatch(strings.TrimSpace(l)); m != nil {
+			where = m[1]
+			continue
+		}
 		n := 0
 		ln := textutil.Normalize(l)
 		for _, u := range h.Covered {
@@ -81,14 +87,52 @@ func matchLine(h recall.Hit) string {
 			}
 		}
 		if n > bestN {
-			best, bestN = l, n
+			best, bestN, bestWhere = l, n, where
 		}
 	}
-	rs := []rune(strings.TrimLeft(best, "-*># "))
-	if len(rs) > 120 {
-		return string(rs[:120]) + "……"
+	line := window(strings.TrimLeft(best, "-*># "), h.Covered, 120)
+	if line != "" && bestWhere != "" {
+		line += "（" + bestWhere + "）"
 	}
-	return string(rs)
+	return line
+}
+
+// placeMark is the marker x-mem puts in a document's text: [第 3 页],
+// [幻灯片 2], [工作表 名称].
+var placeMark = regexp.MustCompile(`^\[((?:第 \d+ 页)|(?:幻灯片 \d+)|(?:工作表 [^\]]+))\]$`)
+
+// window cuts a long line to about max characters around its first match.
+func window(line string, covered []string, max int) string {
+	rs := []rune(line)
+	if len(rs) <= max {
+		return line
+	}
+	lower := strings.ToLower(line)
+	at := -1
+	for _, u := range covered {
+		if i := strings.Index(lower, u); i >= 0 && (at < 0 || i < at) {
+			at = i
+		}
+	}
+	start := 0
+	if at > 0 {
+		start = len([]rune(lower[:at])) - max/3
+		if start < 0 {
+			start = 0
+		}
+	}
+	end := start + max
+	if end > len(rs) {
+		end, start = len(rs), len(rs)-max
+	}
+	out := string(rs[start:end])
+	if start > 0 {
+		out = "……" + out
+	}
+	if end < len(rs) {
+		out += "……"
+	}
+	return out
 }
 
 func describe(d *index.Doc) string {

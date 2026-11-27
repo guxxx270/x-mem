@@ -254,6 +254,7 @@ func (w *Writer) check(p *Proposal, ix *index.Index, verifyQuote bool) []string 
 		}
 	}
 
+	unverified := false
 	if verifyQuote {
 		switch p.Source {
 		case "mcp":
@@ -262,7 +263,10 @@ func (w *Writer) check(p *Proposal, ix *index.Index, verifyQuote bool) []string 
 			} else if p.quoteFound {
 				// found in Submit
 			} else if f, ok := w.FindQuote(p.Quote, time.Duration(w.Settings.QuoteWindowHours)*time.Hour); !ok {
-				add("原话在最近的会话记录里找不到，不写入：%s", cut(p.Quote, 40))
+				// Not in any session file on this machine: Claude's desktop
+				// app keeps its chats elsewhere, and an agent may have
+				// reworded what you said. Nothing is written until you say so.
+				unverified = true
 			} else {
 				p.Session, p.QuoteAt = f.Session, f.Time
 			}
@@ -277,6 +281,10 @@ func (w *Writer) check(p *Proposal, ix *index.Index, verifyQuote bool) []string 
 	p.Review, p.Candidates = "", nil
 	if p.Source == "capture" && !w.Settings.AutoApplyCapture {
 		p.Review = "从会话里自动采集的，确认后才写入"
+	}
+	if unverified {
+		p.Review = "原话没在本机的会话记录里核对上（Claude 桌面版的对话不存在本机；也可能是 agent 改写了你的话），确认后才写入"
+		p.Unverified = true
 	}
 	res := recall.Search(ix, p.Title+"\n"+p.Text, recall.Options{Limit: 3, Now: w.Now(), NoRelated: true})
 	for _, h := range res.Hits {
@@ -599,3 +607,37 @@ func firstLine(s string) string {
 func repoTracks(root, rel string) bool {
 	return exec.Command("git", "-C", root, "ls-files", "--error-unmatch", "--", rel).Run() == nil
 }
+
+// ApproveAll writes every proposal waiting for you that can be taken as it
+// is. Ones that may say again what a note in force already says are left for
+// you to decide one by one (keep both, or turn one into a correction).
+func (w *Writer) ApproveAll() (written, left []*Proposal, failed map[string]error) {
+	failed = map[string]error{}
+	for _, p := range w.inbox().List(Review) {
+		if len(p.Candidates) > 0 {
+			left = append(left, p)
+			continue
+		}
+		got, err := w.Approve(p.ID, "", "")
+		if err != nil {
+			failed[p.ID] = err
+			continue
+		}
+		written = append(written, got)
+	}
+	return written, left, failed
+}
+
+// RejectAll drops every proposal waiting for you.
+func (w *Writer) RejectAll() int {
+	n := 0
+	for _, p := range w.inbox().List(Review) {
+		if _, err := w.Reject(p.ID, "你全部拒绝了"); err == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// Pending lists the proposals waiting for you.
+func (w *Writer) Pending() []*Proposal { return w.inbox().List(Review) }
