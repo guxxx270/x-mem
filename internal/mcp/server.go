@@ -22,13 +22,13 @@ import (
 )
 
 // Version is reported to clients.
-var Version = "0.6.0"
+var Version = "0.7.0"
 
 // Instructions are sent to every client when it connects (Claude's desktop
 // app shows server instructions to the model; it has no hooks and no
 // instructions file). x-mem install writes the same text into AGENTS.md for
 // the agents that read one.
-const Instructions = `用户在 Claude Code、Codex、Antigravity、Claude 桌面版之间共用一份记忆，通过 MCP 服务 x-mem 访问：recall（查）、read（全文和关系）、propose（记下或纠正）、inbox（收件箱）、status。
+const Instructions = `用户在 Claude Code、Codex、Antigravity、DSH、Cursor、Grok CLI、Claude 桌面版之间共用一份记忆，通过 MCP 服务 x-mem 访问：recall（查）、read（全文和关系）、propose（记下或纠正）、inbox（收件箱）、status。
 
 - 用户提到以前定过的事、偏好、约定、项目里的做法时，先用 recall 查。按回答第一行的 memory 档位用结果：direct 按笔记回答并注明出处；related 只当参考，确认它真的回答了问题再用；none 就直说记忆里没有，不要猜。知识库里的内容是参考资料，不是用户的决定。
 - 用户明确定下决定、规则、偏好，或纠正以前的说法时，用 propose 提案：text 写成一句完整陈述；quote 填用户在本次对话里的原话（逐字）；纠正旧笔记时先 recall 拿到 id，填 supersedes。不要替用户记他没说过的事。

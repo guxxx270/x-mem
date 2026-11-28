@@ -7,7 +7,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"x-mem/internal/transcript"
 )
+
+func findRecordedQuote(q string) (transcript.Found, bool) {
+	return transcript.FindQuote(q, time.Hour)
+}
 
 func agRun(t *testing.T, event string, payload map[string]any) map[string]any {
 	t.Helper()
@@ -114,5 +120,74 @@ func TestCodexIsRecognisedWithoutTheFlag(t *testing.T) {
 	json.Unmarshal(data, &in)
 	if in.TurnID != "t1" {
 		t.Fatal("turn id not read")
+	}
+}
+
+func TestDSHCursorGrokHooksAndQuoteLog(t *testing.T) {
+	home, proj := setup(t)
+	t.Setenv("X_MEM_HOME", home)
+	now := time.Now()
+
+	// 1. DSH: Claude-compatible hook JSON + user turn recorded in state/transcripts.
+	dshPrompt, _ := json.Marshal(map[string]any{
+		"session_id": "s-dsh-1",
+		"cwd":        proj,
+		"prompt":     "订单服务用什么数据库？顺便记住：以后日志统一走 zap。",
+	})
+	out := RunAs(DSH, "prompt", strings.NewReader(string(dshPrompt)), now)
+	if !strings.Contains(out, "PostgreSQL 16") {
+		t.Fatalf("dsh prompt should inject db note: %s", out)
+	}
+	if f, ok := findRecordedQuote("以后日志统一走 zap"); !ok || f.Session != "dsh:s-dsh-1" || f.Cwd != proj {
+		t.Fatalf("dsh quote not recorded for FindQuote: %+v %v", f, ok)
+	}
+
+	// 2. Cursor: sessionStart -> additional_context, beforeSubmitPrompt -> continue:true,
+	// beforeShellExecution -> permission:deny once then allow.
+	curRun := func(ev string, p map[string]any) map[string]any {
+		b, _ := json.Marshal(p)
+		s := RunAs(Cursor, ev, strings.NewReader(string(b)), now)
+		var m map[string]any
+		if err := json.Unmarshal([]byte(s), &m); err != nil {
+			t.Fatalf("cursor %s returned non-JSON %q: %v", ev, s, err)
+		}
+		return m
+	}
+	if m := curRun("start", map[string]any{"conversation_id": "cur1", "workspace_roots": []string{proj}}); !strings.Contains(m["additional_context"].(string), "推送前跑全量测试") {
+		t.Fatalf("cursor start: %v", m)
+	}
+	if m := curRun("prompt", map[string]any{"conversation_id": "cur1", "workspace_roots": []string{proj}, "prompt": "Cursor 这边约定缓存统一设五分钟过期"}); m["continue"] != true {
+		t.Fatalf("cursor prompt: %v", m)
+	}
+	if f, ok := findRecordedQuote("缓存统一设五分钟过期"); !ok || f.Session != "cursor:cur1" {
+		t.Fatalf("cursor quote not recorded: %+v %v", f, ok)
+	}
+	pushCur := map[string]any{"conversation_id": "cur1", "workspace_roots": []string{proj}, "command": "git push origin main"}
+	if m := curRun("guard", pushCur); m["permission"] != "deny" || !strings.Contains(m["agent_message"].(string), "全量测试") {
+		t.Fatalf("cursor first push should advise via deny: %v", m)
+	}
+	if m := curRun("guard", pushCur); m["permission"] != "allow" {
+		t.Fatalf("cursor second push should be allowed: %v", m)
+	}
+
+	// 3. Grok CLI: camelCase input, guard returns {"decision":"deny"|"allow"}.
+	grokPush, _ := json.Marshal(map[string]any{
+		"sessionId":     "g1",
+		"workspaceRoot": proj,
+		"toolName":      "Bash",
+		"toolInput":     map[string]any{"command": "git push"},
+	})
+	g1 := RunAs(Grok, "guard", strings.NewReader(string(grokPush)), now)
+	if !strings.Contains(g1, `"decision":"deny"`) || !strings.Contains(g1, "全量测试") {
+		t.Fatalf("grok first push: %s", g1)
+	}
+	g2 := RunAs(Grok, "guard", strings.NewReader(string(grokPush)), now)
+	if g2 != `{"decision":"allow"}` {
+		t.Fatalf("grok second push: %s", g2)
+	}
+	grokPrompt, _ := json.Marshal(map[string]any{"sessionId": "g1", "workspaceRoot": proj, "prompt": "Grok 这边约定接口统一返回毫秒时间戳"})
+	_ = RunAs(Grok, "prompt", strings.NewReader(string(grokPrompt)), now)
+	if f, ok := findRecordedQuote("接口统一返回毫秒时间戳"); !ok || f.Session != "grok:g1" {
+		t.Fatalf("grok quote not recorded: %+v %v", f, ok)
 	}
 }

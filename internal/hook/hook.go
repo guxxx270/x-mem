@@ -74,24 +74,43 @@ const (
 	Claude      = "claude"
 	Codex       = "codex"
 	Antigravity = "antigravity"
+	DSH         = "dsh"
+	Cursor      = "cursor"
+	Grok        = "grok"
 )
 
-// RunAs executes one hook event for a client. Codex uses Claude Code's
-// format; Antigravity's is translated on the way in and out.
+func usesHookTranscript(client string) bool {
+	return client == DSH || client == Cursor || client == Grok
+}
+
+func guardNeedsDenyToAdvise(client string) bool {
+	return client == Antigravity || client == Cursor || client == Grok
+}
+
+// RunAs executes one hook event for a client. Codex and DSH use Claude Code's
+// format; Antigravity, Cursor and Grok are translated on the way in and out.
 func RunAs(client, event string, stdin io.Reader, now time.Time) string {
 	if os.Getenv("X_MEM_DISABLE") != "" { // x-mem's own host runs
 		return quiet(client, event)
 	}
 	data, _ := io.ReadAll(io.LimitReader(stdin, 4<<20))
 	var in Input
-	if client == Antigravity {
+	switch client {
+	case Antigravity:
 		in = fromAntigravity(data)
-	} else {
+	case Cursor:
+		in = fromCursor(data)
+	case Grok:
+		in = fromGrok(data)
+	default:
 		_ = json.Unmarshal(data, &in)
 		// One hooks file serves Claude Code and Codex in the plugin: Codex
 		// says who it is by sending a turn id (and by PLUGIN_ROOT).
 		if client == Claude && (in.TurnID != "" || in.ToolName == "apply_patch") {
 			client = Codex
+		}
+		if client == DSH {
+			in.SessionID = prefixSession("dsh-", in.SessionID)
 		}
 	}
 	in.Client = client
@@ -111,26 +130,38 @@ func RunAs(client, event string, stdin io.Reader, now time.Time) string {
 	if err != nil {
 		return quiet(client, event)
 	}
+	if usesHookTranscript(in.Client) && in.TranscriptPath == "" {
+		in.TranscriptPath = hookTranscriptPath(l, in.SessionID)
+	}
 	out, err := run(event, in, l, now)
 	if err != nil {
 		logErr(l, client+" "+event, err)
 		return quiet(client, event)
 	}
-	if client == Antigravity {
+	switch client {
+	case Antigravity:
 		return toAntigravity(event, out)
+	case Cursor:
+		return toCursor(event, out)
+	case Grok:
+		return toGrok(event, out)
 	}
 	return out
 }
 
-// quiet is the reply that changes nothing. Antigravity's PreToolUse needs an
-// explicit decision: an empty object counts as a refusal with no reason, which
-// would stop every tool call.
+// quiet is the reply that changes nothing. Antigravity, Cursor and Grok need
+// explicit JSON replies on certain hook events.
 func quiet(client, event string) string {
-	if client == Antigravity {
+	switch client {
+	case Antigravity:
 		if event == "guard" {
 			return agAllow
 		}
 		return "{}"
+	case Cursor:
+		return toCursor(event, "")
+	case Grok:
+		return toGrok(event, "")
 	}
 	return ""
 }
@@ -226,6 +257,9 @@ func prompt(in Input, l config.Layers, now time.Time) (string, error) {
 		}
 		st.LastPrompt = key
 		_ = saveSession(l, in.SessionID, st)
+	}
+	if usesHookTranscript(in.Client) {
+		recordUserTurn(in.TranscriptPath, in, now)
 	}
 	if strings.Contains(in.Prompt, OptOutMark) {
 		st.OptOut = true
@@ -325,7 +359,7 @@ func guardHook(in Input, l config.Layers) (string, error) {
 		return guardReply("deny", text), nil
 	}
 	if len(advise) > 0 {
-		if in.Client != Antigravity {
+		if !guardNeedsDenyToAdvise(in.Client) {
 			return guardReply("", inject.GuardBlock("执行这个动作前，用户有规则要你遵守：", advise, GuardBudget)), nil
 		}
 		// Antigravity cannot add context before a tool call. Stop the call

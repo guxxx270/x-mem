@@ -25,7 +25,7 @@ import (
 // running it twice is harmless) and everything else in the file stays.
 // --remove takes x-mem out again.
 func cmdInstall(args []string) error {
-	usage := errors.New("用法：x-mem install claude-code|codex|antigravity|claude-desktop|all [--apply] [--remove] [--drop <旧工具名>]")
+	usage := errors.New("用法：x-mem install claude-code|codex|antigravity|dsh|cursor|grok|claude-desktop|all [--apply] [--remove] [--drop <旧工具名>]")
 	if len(args) == 0 {
 		return usage
 	}
@@ -53,12 +53,18 @@ func cmdInstall(args []string) error {
 		targets = []string{"codex"}
 	case "antigravity":
 		targets = []string{"antigravity"}
+	case "dsh":
+		targets = []string{"dsh"}
+	case "cursor":
+		targets = []string{"cursor"}
+	case "grok":
+		targets = []string{"grok"}
 	case "claude-desktop", "desktop":
 		targets = []string{"claude-desktop"}
 	case "all":
 		targets = detectClients()
 		if len(targets) == 0 {
-			return errors.New("没找到 Claude Code、Codex 或 Antigravity")
+			return errors.New("没找到已支持的客户端（Claude Code、Codex、Antigravity、DSH、Cursor、Grok CLI、Claude 桌面版）")
 		}
 		fmt.Println("找到：", strings.Join(targets, "、"))
 	default:
@@ -78,6 +84,12 @@ func cmdInstall(args []string) error {
 			err = in.codex()
 		case "antigravity":
 			err = in.antigravity()
+		case "dsh":
+			err = in.dsh()
+		case "cursor":
+			err = in.cursor()
+		case "grok":
+			err = in.grok()
 		case "claude-desktop":
 			err = in.claudeDesktop()
 		}
@@ -119,6 +131,15 @@ func detectClients() []string {
 	}
 	if exists(filepath.Join(home(), ".gemini")) || onPath("agy") || onPath("antigravity") {
 		out = append(out, "antigravity")
+	}
+	if exists(dshDir()) || onPath("dsh") {
+		out = append(out, "dsh")
+	}
+	if exists(cursorDir()) || onPath("cursor") {
+		out = append(out, "cursor")
+	}
+	if exists(grokDir()) || onPath("grok") {
+		out = append(out, "grok")
 	}
 	if claudeDesktopInstalled() {
 		out = append(out, "claude-desktop")

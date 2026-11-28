@@ -54,8 +54,8 @@ const usage = `x-mem：给编程 agent 用的本地记忆
                                   认 Markdown、Word（docx/doc）、PDF、Excel（xlsx/xls）、PowerPoint（pptx/ppt）、
                                   WPS/LibreOffice（odt/ods/odp）、EPUB、RTF、HTML、txt/csv（含 GBK 编码）
   x-mem kb list / read / remove   看知识库（读不出的文件也列出来）/ 马上读完新文件 / 移除
-  x-mem install claude-code|codex|antigravity|claude-desktop|all   接入这些应用（--apply 直接改配置，先备份；--remove 拿掉；--drop <旧工具名> 顺手清掉旧工具）
-  x-mem hook start|prompt|guard|stop [--client codex|antigravity]   钩子（从标准输入读事件）
+  x-mem install claude-code|codex|antigravity|dsh|cursor|grok|claude-desktop|all   接入这些应用（--apply 直接改配置，先备份；--remove 拿掉；--drop <旧工具名> 顺手清掉旧工具）
+  x-mem hook start|prompt|guard|stop [--client codex|antigravity|dsh|cursor|grok]  钩子（从标准输入读事件）
   x-mem mcp                       以 MCP 服务运行（stdio）
   x-mem version
 
@@ -113,7 +113,7 @@ func main() {
 			}
 		}
 		if len(rest) != 1 {
-			err = fmt.Errorf("用法：x-mem hook start|prompt|guard|stop [--client claude|codex|antigravity]")
+			err = fmt.Errorf("用法：x-mem hook start|prompt|guard|stop [--client claude|codex|antigravity|dsh|cursor|grok]")
 			break
 		}
 		if out := hook.RunAs(client, rest[0], os.Stdin, time.Now()); out != "" {
@@ -438,7 +438,10 @@ func cmdDoctor() int {
 	}
 	installed := map[string]bool{}
 	for _, c := range detectClients() {
-		installed[map[string]string{"claude-code": "Claude Code", "codex": "Codex", "antigravity": "Antigravity", "claude-desktop": "Claude 桌面版"}[c]] = true
+		installed[map[string]string{
+			"claude-code": "Claude Code", "codex": "Codex", "antigravity": "Antigravity",
+			"dsh": "DSH", "cursor": "Cursor", "grok": "Grok CLI", "claude-desktop": "Claude 桌面版",
+		}[c]] = true
 	}
 	for _, c := range clients {
 		if !installed[c.name] {
@@ -483,6 +486,7 @@ func cmdDoctor() int {
 			}
 		}
 	}
+	doctorExtraClients(installed, ok, note, fail)
 	doctorDesktop(ok, note, fail)
 	in := writer.NewInbox(l.State)
 	if q := in.List(writer.Queued); len(q) > 0 {

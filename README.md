@@ -1,6 +1,6 @@
 # x-mem
 
-给编程 agent 用的本地记忆，**Claude Code、Codex、Antigravity、Claude 桌面版共用一份**。笔记就是普通的 Markdown 文件，分个人层和项目层；x-mem 负责把和当前问题**直接相关**的那一两条找出来交给 agent，记忆里没有的时候老实说没有；你说过的决定可以记下来、纠正、撤回；规则能在动作执行前提醒或拦下；Obsidian 库、放 Word/PDF/Excel 的资料文件夹可以登记成知识库，能查、带出处（PDF 带页码），但不算你定过的事。
+给编程 agent 用的本地记忆，**Claude Code、Codex、Antigravity、DSH（DeepSeek Harness）、Cursor、Grok CLI、Claude 桌面版共用一份**。笔记就是普通的 Markdown 文件，分个人层和项目层；x-mem 负责把和当前问题**直接相关**的那一两条找出来交给 agent，记忆里没有的时候老实说没有；你说过的决定可以记下来、纠正、撤回；规则能在动作执行前提醒或拦下；Obsidian 库、放 Word/PDF/Excel 的资料文件夹可以登记成知识库，能查、带出处（PDF 带页码），但不算你定过的事。
 
 - 单个 Go 二进制，零外部依赖，不联网。x-mem 自己不调模型；需要提炼时借你已登录的 Codex（默认）或 Antigravity 命令行。
 - Markdown 是唯一的真相来源。索引只是缓存，随时可以删；手改笔记后下一次查询自动生效。
@@ -35,24 +35,28 @@ sh scripts/install.sh
 # 或手动从源码编译安装：
 go build -o ~/.x-mem/bin/x-mem ./cmd/x-mem
 x-mem init                                   # 建 ~/.x-mem/personal，并在当前仓库建 .x-mem/
-x-mem install all --apply                    # 本机装了哪个接哪个：Claude Code、Codex、Antigravity、Claude 桌面版
+x-mem install all --apply                    # 本机装了哪个接哪个：Claude Code、Codex、Antigravity、DSH、Cursor、Grok CLI、Claude 桌面版
 x-mem doctor                                 # 确认都接好了
 ```
 
 不加 `--apply` 只列出要改什么，不改文件；改之前每个文件都先备份。重复运行会替换旧的 x-mem 条目，不会重复添加；`--remove` 拿掉；`--drop <旧工具名>` 可顺手把指定旧工具的钩子和 MCP 从配置里拿掉（只动配置，不删文件）。
 
-## 三端互通
+## 多端互通
 
 几个应用用的是同一个程序、同一份 `~/.x-mem`，在哪个应用里记下或纠正的，其他应用马上就能查到。项目层按工作目录找：钩子从应用拿到当前目录；MCP 工具多了一个 `workspace` 参数，应用把工作区路径传进来。
 
-| | Claude Code | Codex | Antigravity |
-|---|---|---|---|
-| 配置位置 | `~/.claude/settings.json` | `~/.codex/hooks.json`、`config.toml`、`AGENTS.md` | `~/.gemini/config/hooks.json`、`mcp_config.json`、`AGENTS.md` |
-| 会话开始给目录 | SessionStart | SessionStart | SessionStart |
-| 每条消息想起 | UserPromptSubmit | UserPromptSubmit | PreInvocation（它没有提交消息的钩子；每条消息只处理一次） |
-| 动作前规则 | PreToolUse：提醒注入上下文，block 拒绝 | 同左（`apply_patch` 按 Edit 匹配） | PreToolUse：block 拒绝；它不能在动作前加上下文，所以提醒规则是“先拦一次、把规则给 agent，再执行就放行” |
-| 会话采集 | Stop | Stop | Stop |
-| MCP（recall / read / propose / inbox / status） | `claude mcp add` | `codex mcp add` | `mcp_config.json` |
+| | Claude Code | Codex | Antigravity | DSH | Cursor | Grok CLI |
+|---|---|---|---|---|---|---|
+| 配置位置 | `~/.claude/settings.json` | `~/.codex/hooks.json`、`config.toml`、`AGENTS.md` | `~/.gemini/config/hooks.json`、`mcp_config.json`、`AGENTS.md` | `~/.dsh/cordis.patch.yml`、`x-mem-hooks.json`、`AGENTS.md` | `~/.cursor/hooks.json`、`mcp.json`、`rules/x-mem.mdc` | `~/.grok/hooks/x-mem.json`、`config.toml`、`AGENTS.md` |
+| 会话开始给目录 | SessionStart | SessionStart | SessionStart | SessionStart | sessionStart | SessionStart |
+| 每条消息想起 | UserPromptSubmit | UserPromptSubmit | PreInvocation | UserPromptSubmit | beforeSubmitPrompt（记原话） | UserPromptSubmit |
+| 动作前规则 | PreToolUse | PreToolUse（`apply_patch` 按 Edit） | PreToolUse（先拦一次提醒） | PreToolUse | beforeShellExecution | PreToolUse |
+| 会话采集 | Stop | Stop | Stop | Stop | stop | Stop |
+| MCP | `claude mcp add` | `codex mcp add` | `mcp_config.json` | `@deepseek-ai/dsh-mcp-client` | `~/.cursor/mcp.json` | `grok mcp add` / `config.toml` |
+
+- **DSH（DeepSeek Harness）**：`x-mem install dsh --apply` 在全局 `~/.dsh/cordis.patch.yml` 中挂载 `@deepseek-ai/dsh-mcp-client` 与 `@deepseek-ai/dsh-hooks-claude-code`（指向 `~/.dsh/x-mem-hooks.json`），所有 profile（`web`、`tui`）自动共享；因 DSH 原生会话日志是 zstd 压缩流，钩子在提交提问时同步把原话记入 `state/transcripts/`，提案核对与会话采集照常工作。
+- **Cursor**：`x-mem install cursor --apply` 写入 `~/.cursor/hooks.json`、`~/.cursor/mcp.json` 和全局规则 `~/.cursor/rules/x-mem.mdc`；打开的 Cursor 窗口可在命令面板执行 `Hooks: Reload` 立即生效。
+- **Grok CLI（`grok`）**：`x-mem install grok --apply` 写入独立的 `~/.grok/hooks/x-mem.json`、注册 `[mcp_servers.x-mem]` 并更新 `~/.grok/AGENTS.md`（网页版 `grok.com` 不运行本机进程，无法接本地 `stdio` MCP）。
 
 - **Claude 桌面版**没有钩子，只接 MCP（`claude_desktop_config.json` 里的 `mcpServers.x-mem`）；怎么用记忆写在 MCP 服务连上时下发的说明里。桌面版开着的时候会把设置整份留在内存里、退出时写回，这时改配置会被覆盖，所以 `x-mem install claude-desktop --apply` 发现它开着就不改文件，在后台等它退出后再改，下次打开就接上了（想马上生效就 ⌘Q 退出再打开）。桌面版的对话不存在本机，提案的原话核对不上，会进收件箱等你确认（见下文）。
 - **Codex** 只运行你信任过的钩子：装好后在 Codex 里信任一次（CLI 输入 `/hooks`；App 在 设置 → Hooks）。信任记录按钩子在 `hooks.json` 里的位置算，位置变了（比如删掉了排在前面的其他钩子）要重新信任。`x-mem doctor` 会指出哪几个还没信任。没信任时 MCP 仍然可用（Codex 会按 AGENTS.md 主动 recall），只是每条消息的自动想起和动作前规则不生效。

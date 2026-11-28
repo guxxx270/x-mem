@@ -32,6 +32,9 @@ const (
 	Claude      = "claude"
 	Codex       = "codex"
 	Antigravity = "antigravity"
+	DSH         = "dsh"
+	Cursor      = "cursor"
+	Grok        = "grok"
 )
 
 // Message is one turn's text, or ("meta") something about the session.
@@ -83,13 +86,33 @@ func AntigravityDirs() []string {
 	return []string{filepath.Join(g, "antigravity"), filepath.Join(g, "antigravity-cli"), filepath.Join(g, "antigravity-ide")}
 }
 
+// HookTranscriptsDir is where x-mem logs user prompts for agents whose own
+// session files are compressed or binary (DSH, Cursor, Grok CLI).
+func HookTranscriptsDir() string {
+	h := os.Getenv("X_MEM_HOME")
+	if h == "" {
+		h = filepath.Join(home(), ".x-mem")
+	}
+	return filepath.Join(h, "state", "transcripts")
+}
+
 // ClientOf guesses which agent wrote a session file from its path.
 func ClientOf(path string) string {
 	p := filepath.ToSlash(path)
+	base := filepath.Base(p)
 	switch {
+	case strings.Contains(p, "/state/transcripts/"):
+		switch {
+		case strings.HasPrefix(base, "dsh-") || strings.HasPrefix(base, "dsh_"):
+			return DSH
+		case strings.HasPrefix(base, "cursor-") || strings.HasPrefix(base, "cursor_"):
+			return Cursor
+		case strings.HasPrefix(base, "grok-") || strings.HasPrefix(base, "grok_"):
+			return Grok
+		}
 	case strings.Contains(p, "/.system_generated/") || strings.Contains(p, "/brain/"):
 		return Antigravity
-	case strings.HasPrefix(filepath.Base(p), "rollout-") || strings.Contains(p, "/.codex/"):
+	case strings.HasPrefix(base, "rollout-") || strings.Contains(p, "/.codex/"):
 		return Codex
 	}
 	return Claude
@@ -97,11 +120,17 @@ func ClientOf(path string) string {
 
 // SessionOf is the session id a file belongs to, from its path.
 func SessionOf(path string) string {
-	if ClientOf(path) == Antigravity {
+	c := ClientOf(path)
+	if c == Antigravity {
 		// brain/<conversationId>/.system_generated/logs/transcript.jsonl
 		return filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(path))))
 	}
-	return strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	if c == DSH || c == Cursor || c == Grok {
+		name = strings.TrimPrefix(name, c+"-")
+		name = strings.TrimPrefix(name, c+"_")
+	}
+	return name
 }
 
 var (
@@ -136,6 +165,10 @@ func ReadFrom(path string, offset int64) ([]Message, int64, error) {
 		}
 		pos += int64(len(raw))
 		if m, ok := parse(raw); ok {
+			if c := ClientOf(path); c == DSH || c == Cursor || c == Grok {
+				m.Client = c
+				m.Session = strings.TrimPrefix(strings.TrimPrefix(m.Session, c+"-"), c+"_")
+			}
 			if m.Session == "" && m.Role != "meta" {
 				m.Session = SessionOf(path)
 			}
@@ -348,6 +381,8 @@ func Recent(within time.Duration, max int) []string {
 		m, _ := filepath.Glob(filepath.Join(dir, "brain", "*", ".system_generated", "logs", "transcript.jsonl"))
 		add(m)
 	}
+	m, _ = filepath.Glob(filepath.Join(HookTranscriptsDir(), "*.jsonl"))
+	add(m)
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
 	var out []string
 	for i, x := range files {
